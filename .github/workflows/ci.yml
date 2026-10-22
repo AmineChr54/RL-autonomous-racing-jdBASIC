@@ -1,0 +1,51 @@
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+env:
+  PY_REPO: https://github.com/AmineChr54/RL-autonomous-racing
+
+jobs:
+  python-side:
+    # Always-on checks that do not need jdBasic: the Python original imports and the test scripts compile.
+    runs-on: [self-hosted, jdbasic]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        timeout-minutes: 5
+      - name: Clone the Python original
+        timeout-minutes: 5
+        run: git clone --depth 1 "$PY_REPO" "$RUNNER_TEMP/py" && echo "PY_PROJECT=$RUNNER_TEMP/py" >> "$GITHUB_ENV"
+      - name: Compile Python tests and tools
+        timeout-minutes: 2
+        run: python -m py_compile tests/env_parity.py tests/brain_parity.py tools/jd.py
+      - name: Python original imports (track, env, brain)
+        timeout-minutes: 5
+        run: cd "$PY_PROJECT" && python -c "import track, env, brain; print('genome_size', brain.genome_size())"
+
+  jdbasic-wine:
+    # jdBasic.exe under Wine. Currently crashes at startup in Wine 9.0 (see ci/README.md), so this job is
+    # advisory (continue-on-error) until that is solved; flip it to required once it passes.
+    runs-on: [self-hosted, jdbasic]
+    timeout-minutes: 30
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        timeout-minutes: 5
+      - name: Clone the Python original
+        timeout-minutes: 5
+        run: git clone --depth 1 "$PY_REPO" "$RUNNER_TEMP/py" && echo "PY_PROJECT=$RUNNER_TEMP/py" >> "$GITHUB_ENV"
+      - name: torch_gradcheck
+        timeout-minutes: 8
+        run: JD_TIME=420 tools/jd.sh run tests/torch_gradcheck.jdb
+      - name: track_check
+        timeout-minutes: 8
+        run: JD_TIME=420 tools/jd.sh run tests/track_check.jdb
+      - name: env_parity
+        timeout-minutes: 8
+        run: python tests/env_parity.py
+      - name: brain_parity
+        timeout-minutes: 8
+        run: python tests/brain_parity.py
