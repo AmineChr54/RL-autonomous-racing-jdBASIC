@@ -9,7 +9,7 @@ The user has authorised opening and merging PRs and closing issues without askin
 never rewrite history on `main`, never delete branches other than your own.
 
 1. **Issue.** Work on an existing issue (`gh issue view <n>`), or create one first:
-   `gh issue create --title "..." --body "..." --label feature` (labels: feature, bug, jdbasic-bug, infra, docs).
+   `gh issue create --title "..." --body "..." --label feature` (labels: feature, bug, jdbasic-bug, infra, perf, documentation).
 2. **Branch** from up-to-date main: `git fetch origin && git switch -c <n>-short-name origin/main`.
 3. **Implement** following the `jdbasic-native` skill (memory cap!). Keep the Python file layout and constants.
    Add or extend a test for what you built. Run the green-test list from `jdbasic-native` that touches your change,

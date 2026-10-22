@@ -20,7 +20,7 @@ tools/jd.sh build  file.jdb          # compile only
 ```
 `JD_MEM=<MB>` (default 1024) and `JD_TIME=<s>` (default 600) override the caps; `CAPPED_PEAK=1` prints peak memory.
 Python tests use `tools/jd.py` (`jd.run(src, native=...)`). Never raise JD_MEM above 2048.
-Run at most 2 jdBasic processes at the same time.
+Run at most ONE jdBasic process at a time: other agents share this machine (16 GB) and each run may take up to its cap.
 
 ## Rules for code that also compiles with -c (each one was a real bug)
 
