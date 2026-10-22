@@ -98,7 +98,14 @@ The full list of jdBasic bugs and gaps, each with its workaround and measured co
 
 ## Development workflow
 
-Every feature or fix is a GitHub issue, worked on a branch and merged through a pull request once the checks pass. CI runs on a **self-hosted GitHub Actions runner in a local Docker container**, because the hosted runners have limits. The container runs jdBasic's interpreter under Wine with a hard memory limit. Native (`-c`) builds need MSVC on Windows and are checked locally with `tools/jd.sh native`.
+Every feature or fix is a GitHub issue, worked on a branch and merged through a pull request once the checks pass. CI runs on a **self-hosted GitHub Actions runner in a local Docker container**, because the hosted runners have limits. The container has a hard 3 GB memory limit (`--memory 3g --memory-swap 3g`). Native (`-c`) builds need MSVC on Windows and are checked locally with `tools/jd.sh native`.
+
+```bash
+ci/start-runner.sh   # Git Bash: builds the image, fetches a registration token via gh (never stored), starts the container
+ci/stop-runner.sh    # deregisters the runner and removes the container
+```
+The container restarts automatically (`--restart unless-stopped`). Details and the Wine status are in `ci/README.md`.
+`jdBasic.exe` under Wine 9.0 currently crashes at startup, so the jdBasic test job in `.github/workflows/ci.yml` is advisory; the Python-side job is required.
 
 ## Credits
 
