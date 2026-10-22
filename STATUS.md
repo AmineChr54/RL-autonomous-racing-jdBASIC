@@ -34,10 +34,15 @@ An uncapped native test once took 14.5 GB of RAM.
 6. A local declared `DIM x = 0` silently turns an array assigned to it into 0.
 7. In a module, a Map value read into an untyped local never matches a `SWITCH CASE` (`IF` works).
 8. `ONES([m{"r"}, m{"c"}])`, a shape built from Map values, crashes.
+9. Every whole-array temporary (`MATMUL`, `a * b`, `TANH(a)`, `RESHAPE`, `DIM x AS ARRAY = expr` in a loop, even re-assignment `x = a * a`) is never freed: 200 x 100 doubles per op x 200 iterations = +160 MB. Scalar element loops over preallocated arrays (as `env.jdb`) do not leak. Repro: loop `DIM a AS ARRAY = x * x` with a 1000x100 `x`. Workaround: `BRAIN.FORWARD` and `NextGeneration` use scalar loops writing into buffers made once per generation. Whole-array math is fine only for one-off (per generation or per program) work.
 - Interpreter: `IIF` on 2D arrays is broken. Library: `RAND.DRAWS(gen,"normal",n)` returns zeros (σ defaults to 0).
+
+## Evolution
+`tools/jd.sh native tests/evo_smoke.jdb 20`: about 5.2 s/generation (200 cars, 900 ticks), peak 63 MB, flat. Best car passes a full lap (3186 px)
+by gen 14-20, mean 683 at gen 20. Interpreted: about 70 s/generation, 2 generations suffice as a check.
 
 ## Work tracking
 Everything open is a GitHub issue: https://github.com/AmineChr54/RL-autonomous-racing-jdBASIC/issues
-(#19 local CI, #20 evolution under -c, #21 REINFORCE, #22 DQN, #23 PPO, #24 trainer + headless main,
+(#19 local CI, #21 REINFORCE, #22 DQN, #23 PPO, #24 trainer + headless main,
 #25 GUI, #26 plot_curves, #27 bench, #28 PyTorch cross-check, #29 COMPARISON.md).
 Done work and the jdBasic bugs above are closed issues #1-#18.
