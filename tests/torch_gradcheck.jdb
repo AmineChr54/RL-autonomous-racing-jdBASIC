@@ -1,6 +1,6 @@
 ' Checks every TORCH op's gradient against central finite differences.
 '   jdBasic tests/torch_gradcheck.jdb        (from the project root)
-IMPORT TORCH, RAND
+IMPORT TORCH, RAND, TESTKIT
 
 DIM gen = RAND.GENERATOR(7)
 DIM pa = TORCH.PARAM(TORCH.RANDN(gen, 3, 4))
@@ -112,7 +112,6 @@ FUNC CheckParam(k AS INTEGER, pid)
 ENDFUNC
 
 DIM k AS INTEGER = 0
-DIM fails AS INTEGER = 0
 DIM e AS DOUBLE = 0.0
 DIM worst AS DOUBLE = 0.0
 DIM pidlist = [pa, pb, pc, prow]
@@ -120,6 +119,7 @@ DIM pnames$ = ["a", "b", "c", "row"]
 DIM q AS INTEGER = 0
 DIM used AS INTEGER = 0
 DIM line$ = ""
+TESTKIT.SUITE("torch gradcheck")
 FOR k = 0 TO NCASES - 1
     worst = 0.0
     line$ = ""
@@ -142,16 +142,7 @@ FOR k = 0 TO NCASES - 1
             IF e > worst THEN worst = e
         NEXT q
     ENDIF
-    IF worst > 0.0001 THEN
-        fails = fails + 1
-        PRINT "FAIL "; names$[k]; line$
-    ELSE
-        PRINT "ok   "; names$[k]; line$
-    ENDIF
+    TESTKIT.ISTRUE(worst <= 0.0001, names$[k] + line$)
 NEXT k
-IF fails = 0 THEN
-    PRINT "gradcheck: all "; NCASES; " ops PASS"
-ELSE
-    PRINT "gradcheck: "; fails; " FAILED"
-    END 1
-ENDIF
+PRINT "gradcheck worst-case relative error threshold 1e-4, ops checked: "; NCASES
+TESTKIT.REPORT()

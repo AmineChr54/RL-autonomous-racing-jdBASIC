@@ -37,6 +37,16 @@ An uncapped native test once took 14.5 GB of RAM.
 9. Every whole-array temporary (`MATMUL`, `a * b`, `TANH(a)`, `RESHAPE`, `DIM x AS ARRAY = expr` in a loop, even re-assignment `x = a * a`) is never freed: 200 x 100 doubles per op x 200 iterations = +160 MB. Scalar element loops over preallocated arrays (as `env.jdb`) do not leak. Repro: loop `DIM a AS ARRAY = x * x` with a 1000x100 `x`. Workaround: `BRAIN.FORWARD` and `NextGeneration` use scalar loops writing into buffers made once per generation. Whole-array math is fine only for one-off (per generation or per program) work.
 - Interpreter: `IIF` on 2D arrays is broken. Library: `RAND.DRAWS(gen,"normal",n)` returns zeros (σ defaults to 0).
 
+## Library audit (issue #31, `docs/LIBRARY_AUDIT.md`)
+Adopt: `rand`, `stats`, `cli` (main flags), `testkit` (tests; done in torch_gradcheck), `svg` (plot_curves), `img` (GUI track PNG),
+`df` + `console` (tables), `logger` (training logs), `pool` (parallel bench seeds, `-c` only). Not needed: ml, metrics, fit, conf, yaml and the rest.
+All probed libs compile and run under `-c` when handles are typed (`DIM lg AS MAP = LOGGER.NEW(..)`). Lib / -c problems found:
+10. `RAND.DRAWS` p1/p2 default to 0 (rand.jdb:299-333): normal has sigma 0 (#17, known).
+11. `TESTKIT.EQARRAY` on 2-D arrays is always false under `-c` (testkit.jdb:100-107): flatten with `RESHAPE` first (#36).
+12. `NOW_EPOCH()` has whole-second resolution under `-c` (affects logger.jdb:124, dt.jdb:141): use `TICK()` for durations (#37).
+13. Interpreter: an `ASYNC FUNC` sees module CONSTs/globals as 0, so `POOL` workers that call ENV/TRACK only work under `-c` (#38).
+14. `DF.WRITECSV` / `CSVWRITER` writes 6 significant digits (df.jdb:625): keep our `FORMAT$("{:.17g}")` writers for parity traces (#39).
+
 ## Evolution
 `tools/jd.sh native tests/evo_smoke.jdb 20`: about 5.2 s/generation (200 cars, 900 ticks), peak 63 MB, flat. Best car passes a full lap (3186 px)
 by gen 14-20, mean 683 at gen 20. Interpreted: about 70 s/generation, 2 generations suffice as a check.
