@@ -27,10 +27,9 @@ jobs:
 
   jdbasic-wine:
     # jdBasic.exe under Wine. Currently crashes at startup in Wine 9.0 (see ci/README.md), so this job is
-    # advisory (continue-on-error) until that is solved; flip it to required once it passes.
+    # advisory (test steps are continue-on-error) until that is solved; flip it to required once it passes.
     runs-on: [self-hosted, jdbasic]
     timeout-minutes: 30
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
         timeout-minutes: 5
@@ -39,13 +38,17 @@ jobs:
         run: git clone --depth 1 "$PY_REPO" "$RUNNER_TEMP/py" && echo "PY_PROJECT=$RUNNER_TEMP/py" >> "$GITHUB_ENV"
       - name: torch_gradcheck
         timeout-minutes: 8
+        continue-on-error: true
         run: JD_TIME=420 tools/jd.sh run tests/torch_gradcheck.jdb
       - name: track_check
         timeout-minutes: 8
+        continue-on-error: true
         run: JD_TIME=420 tools/jd.sh run tests/track_check.jdb
       - name: env_parity
         timeout-minutes: 8
+        continue-on-error: true
         run: python tests/env_parity.py
       - name: brain_parity
         timeout-minutes: 8
+        continue-on-error: true
         run: python tests/brain_parity.py
