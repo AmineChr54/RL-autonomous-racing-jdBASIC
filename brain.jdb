@@ -54,84 +54,55 @@ EXPORT FUNC RANDOM_GENOMES(n, gen) AS ARRAY
     RETURN g
 ENDFUNC
 
-' a GENOME x k matrix that picks k consecutive genome columns starting at p
-FUNC Pick(p AS INTEGER, k AS INTEGER) AS ARRAY
-    DIM m AS ARRAY = TORCH.ZEROS_RC(GENOME, k)
-    DIM j AS INTEGER = 0
-    FOR j = 0 TO k - 1
-        m[p + j, j] = 1
-    NEXT j
-    RETURN m
-ENDFUNC
-
-' E: in x (in*out), repeats input i into columns i*out .. i*out+out-1
-FUNC Expand(ni AS INTEGER, no AS INTEGER) AS ARRAY
-    DIM m AS ARRAY = TORCH.ZEROS_RC(ni, ni * no)
-    DIM i AS INTEGER = 0
-    DIM o AS INTEGER = 0
-    FOR i = 0 TO ni - 1
-        FOR o = 0 TO no - 1
-            m[i, i * no + o] = 1
-        NEXT o
-    NEXT i
-    RETURN m
-ENDFUNC
-
-' S: (in*out) x out, adds column i*out+o into output o
-FUNC Collect(ni AS INTEGER, no AS INTEGER) AS ARRAY
-    DIM m AS ARRAY = TORCH.ZEROS_RC(ni * no, no)
-    DIM i AS INTEGER = 0
-    DIM o AS INTEGER = 0
-    FOR i = 0 TO ni - 1
-        FOR o = 0 TO no - 1
-            m[i * no + o, o] = 1
-        NEXT o
-    NEXT i
-    RETURN m
-ENDFUNC
-
-' cut every car's weights out of the genomes: {"W0", "b0", "E0", "S0", ...} for FORWARD
+' Under -c every whole-array temporary (MATMUL, *, TANH, ...) leaks until the program ends, so a per-tick
+' forward pass built from array ops eats gigabytes. FORWARD therefore uses scalar loops that write into
+' buffers allocated once per generation by PREP (like env.jdb does).
 EXPORT FUNC PREP(genomes AS ARRAY) AS MAP
-    DIM s AS ARRAY = SIZES()
+    DIM n AS INTEGER = LEN(genomes)
     DIM br = {}
-    DIM p AS INTEGER = 0
-    DIM l AS INTEGER = 0
-    DIM ni AS INTEGER = 0
-    DIM no AS INTEGER = 0
-    DIM k$ = ""
-    FOR l = 0 TO N_LAYERS - 1
-        ni = s[l]
-        no = s[l + 1]
-        k$ = STR$(l)
-        br{"W" + k$} = MATMUL(genomes, Pick(p, ni * no))
-        p = p + ni * no
-        br{"b" + k$} = MATMUL(genomes, Pick(p, no))
-        p = p + no
-        br{"E" + k$} = Expand(ni, no)
-        br{"S" + k$} = Collect(ni, no)
-    NEXT l
+    DIM g AS ARRAY = genomes
+    DIM h1 AS ARRAY = TORCH.ZEROS_RC(n, 12)
+    DIM h2 AS ARRAY = TORCH.ZEROS_RC(n, 12)
+    DIM o AS ARRAY = TORCH.ZEROS_RC(n, 2)
+    br{"G"} = g
+    br{"n"} = n
+    br{"h1"} = h1
+    br{"h2"} = h2
+    br{"out"} = o
     RETURN br
 ENDFUNC
 
-' one layer for all cars: tanh(x_n . W_n + b_n) for every row n
-FUNC Layer(br AS MAP, l AS INTEGER, x AS ARRAY) AS ARRAY
-    DIM k$ = STR$(l)
-    DIM W AS ARRAY = br{"W" + k$}
-    DIM b AS ARRAY = br{"b" + k$}
-    DIM E AS ARRAY = br{"E" + k$}
-    DIM S AS ARRAY = br{"S" + k$}
-    DIM h AS ARRAY = TANH(MATMUL(MATMUL(x, E) * W, S) + b)
-    RETURN h
-ENDFUNC
+' one layer for all cars: xout[c, j] = tanh(sum_i xin[c, i] * W_c[i, j] + b_c[j]); the genome row holds
+' the ni*no weights (index i*no + j) from column off, then the no biases
+SUB Layer(g AS ARRAY, n AS INTEGER, off AS INTEGER, ni AS INTEGER, no AS INTEGER, xin AS ARRAY, xout AS ARRAY)
+    DIM c AS INTEGER = 0
+    DIM i AS INTEGER = 0
+    DIM j AS INTEGER = 0
+    DIM acc AS DOUBLE = 0.0
+    DIM bo AS INTEGER = off + ni * no
+    FOR c = 0 TO n - 1
+        FOR j = 0 TO no - 1
+            acc = g[c, bo + j]
+            FOR i = 0 TO ni - 1
+                acc = acc + xin[c, i] * g[c, off + i * no + j]
+            NEXT i
+            xout[c, j] = TANH(acc)
+        NEXT j
+    NEXT c
+ENDSUB
 
-' run every car's own network on its own observation: obs N x 8 -> actions N x 2
+' run every car's own network on its own observation: obs N x 8 -> actions N x 2 (a buffer owned by br,
+' overwritten by the next call)
 EXPORT FUNC FORWARD(br AS MAP, obs AS ARRAY) AS ARRAY
-    DIM x AS ARRAY = obs
-    DIM l AS INTEGER = 0
-    FOR l = 0 TO N_LAYERS - 1
-        x = Layer(br, l, x)
-    NEXT l
-    RETURN x
+    DIM g AS ARRAY = br{"G"}
+    DIM h1 AS ARRAY = br{"h1"}
+    DIM h2 AS ARRAY = br{"h2"}
+    DIM o AS ARRAY = br{"out"}
+    DIM n AS INTEGER = br{"n"}
+    Layer(g, n, 0, 8, 12, obs, h1)
+    Layer(g, n, 108, 12, 12, h1, h2)
+    Layer(g, n, 264, 12, 2, h2, o)
+    RETURN o
 ENDFUNC
 
 ' activations of every layer for ONE car (one: its genome, a 1-D row of 290, obs: a 1-D row of 8), for the
@@ -139,13 +110,18 @@ ENDFUNC
 EXPORT FUNC ACTS(one AS ARRAY, obs AS ARRAY) AS MAP
     DIM br AS MAP = PREP(RESHAPE(one, [1, GENOME]))
     DIM x AS ARRAY = RESHAPE(obs, [1, LEN(obs)])
+    DIM g AS ARRAY = br{"G"}
+    DIM h1 AS ARRAY = br{"h1"}
+    DIM h2 AS ARRAY = br{"h2"}
+    DIM o AS ARRAY = br{"out"}
+    Layer(g, 1, 0, 8, 12, x, h1)
+    Layer(g, 1, 108, 12, 12, h1, h2)
+    Layer(g, 1, 264, 12, 2, h2, o)
     DIM acts = {}
     acts{"0"} = obs
-    DIM l AS INTEGER = 0
-    FOR l = 0 TO N_LAYERS - 1
-        x = Layer(br, l, x)
-        acts{STR$(l + 1)} = x[0]
-    NEXT l
+    acts{"1"} = h1[0]
+    acts{"2"} = h2[0]
+    acts{"3"} = o[0]
     acts{"n"} = N_LAYERS + 1
     RETURN acts
 ENDFUNC
