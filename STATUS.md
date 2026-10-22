@@ -36,6 +36,8 @@ An uncapped native test once took 14.5 GB of RAM.
 8. `ONES([m{"r"}, m{"c"}])`, a shape built from Map values, crashes.
 - Interpreter: `IIF` on 2D arrays is broken. Library: `RAND.DRAWS(gen,"normal",n)` returns zeros (σ defaults to 0).
 
-## In progress / not started
-brain, evolution, rl_common, reinforce, dqn, ppo, main (GUI and headless), plot_curves, bench, the PyTorch
-cross-check, README.md, COMPARISON.md.
+## Work tracking
+Everything open is a GitHub issue: https://github.com/AmineChr54/RL-autonomous-racing-jdBASIC/issues
+(#19 local CI, #20 evolution under -c, #21 REINFORCE, #22 DQN, #23 PPO, #24 trainer + headless main,
+#25 GUI, #26 plot_curves, #27 bench, #28 PyTorch cross-check, #29 COMPARISON.md).
+Done work and the jdBasic bugs above are closed issues #1-#18.
