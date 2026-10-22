@@ -9,7 +9,7 @@
 ' A trainer is a map; ADVANCE(t) runs one env tick and returns 1 when a generation just finished.
 
 EXPORT MODULE EVOLUTION
-IMPORT ENV, BRAIN, TORCH
+IMPORT ENV, BRAIN, TORCH, RAND
 
 CONST ELITE_FRAC = 0.08
 CONST PARENT_FRAC = 0.30
@@ -66,29 +66,36 @@ SUB NextGeneration(t AS MAP)
     IF n_elite < 2 THEN n_elite = 2
     DIM n_par AS INTEGER = CINT(INT(n * PARENT_FRAC))
     IF n_par < 4 THEN n_par = 4
-    ' row r of the new swarm = crossover of parents ia[r] and ib[r]; for the elites both are the same car,
-    ' and they are not mutated, so they survive untouched
-    DIM ia AS ARRAY = ZEROS([n])
-    DIM ib AS ARRAY = ZEROS([n])
-    DIM keep AS ARRAY = TORCH.ZEROS_RC(n, 1)          ' 1 = this row may mutate
+    ' row r of the new swarm = crossover of parents pa and pb; the elites are copied untouched. Scalar loops,
+    ' because every whole-array temporary leaks under -c.
+    DIM nw AS ARRAY = TORCH.ZEROS_RC(n, BRAIN.GENOME)
     DIM r AS INTEGER = 0
+    DIM c AS INTEGER = 0
+    DIM pa AS INTEGER = 0
+    DIM pb AS INTEGER = 0
+    DIM v AS DOUBLE = 0.0
     FOR r = 0 TO n - 1
         IF r < n_elite THEN
-            ia[r] = order[r]
-            ib[r] = order[r]
+            pa = CINT(order[r])
+            FOR c = 0 TO BRAIN.GENOME - 1
+                nw[r, c] = G[pa, c]
+            NEXT c
         ELSE
-            ia[r] = order[CINT(RNG.INT(gen, 0, n_par - 1))]
-            ib[r] = order[CINT(RNG.INT(gen, 0, n_par - 1))]
-            keep[r, 0] = 1
+            pa = CINT(order[CINT(RNG.INT(gen, 0, n_par - 1))])
+            pb = CINT(order[CINT(RNG.INT(gen, 0, n_par - 1))])
+            FOR c = 0 TO BRAIN.GENOME - 1
+                IF RNG.NEXT(gen) < 0.5 THEN              ' crossover: mix genes of two parents
+                    v = G[pa, c]
+                ELSE
+                    v = G[pb, c]
+                ENDIF
+                IF RNG.NEXT(gen) < MUT_RATE THEN         ' mutation: random typos (normal, from lib RAND)
+                    v = v + RAND.NORMAL(gen, 0, MUT_SIGMA)
+                ENDIF
+                nw[r, c] = v
+            NEXT c
         ENDIF
     NEXT r
-    DIM A AS ARRAY = G[ia]
-    DIM B AS ARRAY = G[ib]
-    DIM cross AS ARRAY = TORCH.RANDU(gen, n, BRAIN.GENOME, 0, 1) < 0.5        ' crossover: mix genes of two parents
-    DIM child AS ARRAY = cross * A + (1 - cross) * B
-    DIM mutate AS ARRAY = TORCH.RANDU(gen, n, BRAIN.GENOME, 0, 1) < MUT_RATE  ' mutation: random typos
-    DIM rowmask AS ARRAY = MATMUL(keep, TORCH.ONES_RC(1, BRAIN.GENOME))
-    DIM nw AS ARRAY = child + mutate * rowmask * TORCH.RANDN(gen, n, BRAIN.GENOME) * MUT_SIGMA
     t{"genomes"} = nw
     t{"brains"} = BRAIN.PREP(nw)
     t{"generation"} = t{"generation"} + 1
