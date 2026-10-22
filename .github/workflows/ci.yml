@@ -37,18 +37,14 @@ jobs:
         timeout-minutes: 5
         run: git clone --depth 1 "$PY_REPO" "$RUNNER_TEMP/py" && echo "PY_PROJECT=$RUNNER_TEMP/py" >> "$GITHUB_ENV"
       - name: torch_gradcheck
-        timeout-minutes: 8
-        continue-on-error: true
-        run: JD_TIME=420 tools/jd.sh run tests/torch_gradcheck.jdb
+        timeout-minutes: 6
+        run: JD_TIME=240 tools/jd.sh run tests/torch_gradcheck.jdb
       - name: track_check
-        timeout-minutes: 8
-        continue-on-error: true
-        run: JD_TIME=420 tools/jd.sh run tests/track_check.jdb
+        timeout-minutes: 6
+        run: JD_TIME=240 tools/jd.sh run tests/track_check.jdb
       - name: env_parity
-        timeout-minutes: 8
-        continue-on-error: true
+        timeout-minutes: 6
         run: python tests/env_parity.py
       - name: brain_parity
-        timeout-minutes: 8
-        continue-on-error: true
+        timeout-minutes: 6
         run: python tests/brain_parity.py
