@@ -1,0 +1,15 @@
+# build output of jdBasic -c and the runtime files it copies next to every .exe
+*.exe
+*.obj
+*.lib
+*.pdb
+*.dll
+*.ttf
+# test traces, saved brains, caches
+tests/out/
+saves/
+cache/
+__pycache__/
+# scratch
+spikes/
+.claude/settings.local.json

@@ -1,0 +1,21 @@
+' Evolution smoke test: N generations, 200 cars, hard track; prints one line per generation.
+'   tools/jd.sh run|native tests/evo_smoke.jdb 3
+IMPORT TRACK, ENV, EVOLUTION
+DIM t0 AS DOUBLE = TICK()
+DIM tr AS MAP = TRACK.NEW("hard")
+PRINT "track built in "; INT(TICK() - t0); " ms"
+DIM e AS MAP = ENV.NEW(tr, 200, 900, 0)
+DIM ev AS MAP = EVOLUTION.NEW(e, 0)
+DIM gens AS INTEGER = CINT(VAL(OS.ARGS()[1]))
+DIM ticks AS INTEGER = 0
+DIM hb AS ARRAY = [0]
+DIM hm AS ARRAY = [0]
+t0 = TICK()
+WHILE ev{"generation"} <= gens
+    ticks = ticks + 1
+    IF EVOLUTION.ADVANCE(ev) = 1 THEN
+        hb = ev{"hist_best"}
+        hm = ev{"hist_mean"}
+        PRINT "gen "; LEN(hb); "  best "; INT(hb[LEN(hb) - 1]); "  mean "; INT(hm[LEN(hm) - 1]); "  ticks "; ticks; "  ["; INT(TICK() - t0); " ms]"
+    ENDIF
+WEND

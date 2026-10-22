@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "jdbasic": {
+      "command": "C:\\Users\\amine\\jdbasic-native\\jdBasic.exe",
+      "args": ["--mcp"],
+      "cwd": "D:\\Projects\\RL-autonomous-racing-jdBASIC"
+    }
+  }
+}

@@ -1,0 +1,135 @@
+' evolution.jdb - neuroevolution: learn by natural selection instead of by gradients.
+'
+' Loop:
+'   1. Let every car drive with its own brain until it crashes (or time runs out).
+'   2. Score each car = how far it got (fitness).
+'   3. Keep the best (elites), breed new cars from the better part (crossover), add random typos (mutation).
+'   4. Repeat. Each repetition is a *generation*.
+'
+' A trainer is a map; ADVANCE(t) runs one env tick and returns 1 when a generation just finished.
+
+EXPORT MODULE EVOLUTION
+IMPORT ENV, BRAIN, TORCH
+
+CONST ELITE_FRAC = 0.08
+CONST PARENT_FRAC = 0.30
+CONST MUT_RATE = 0.12      ' fraction of genes that get nudged
+CONST MUT_SIGMA = 0.25     ' size of the nudge
+
+EXPORT FUNC NEW(e AS MAP, seed) AS MAP
+    DIM t = {}
+    t{"mode"} = "evolution"
+    t{"name"} = "Neuroevolution"
+    t{"env"} = e
+    t{"rng"} = RNG.NEW(seed + 101)
+    e{"auto_reset"} = 0
+    e{"random_start"} = 0
+    t{"n"} = e{"n"}
+    DIM g AS ARRAY = BRAIN.RANDOM_GENOMES(e{"n"}, t{"rng"})
+    t{"genomes"} = g
+    t{"brains"} = BRAIN.PREP(g)
+    t{"generation"} = 1
+    t{"hist_best"} = []                 ' best and mean fitness per generation
+    t{"hist_mean"} = []
+    t{"obs"} = ENV.RESET(e)
+    RETURN t
+ENDFUNC
+
+' one env tick; returns 1 when a generation just finished
+EXPORT FUNC ADVANCE(t AS MAP) AS INTEGER
+    DIM e AS MAP = t{"env"}
+    DIM br AS MAP = t{"brains"}
+    DIM obs AS ARRAY = t{"obs"}
+    t{"obs"} = ENV.TICK(e, BRAIN.FORWARD(br, obs))
+    IF ENV.ALL_DEAD(e) = 1 THEN
+        NextGeneration(t)
+        RETURN 1
+    ENDIF
+    RETURN 0
+ENDFUNC
+
+' ---- breeding
+SUB NextGeneration(t AS MAP)
+    DIM e AS MAP = t{"env"}
+    DIM gen AS INTEGER = t{"rng"}
+    DIM G AS ARRAY = t{"genomes"}
+    DIM n AS INTEGER = t{"n"}
+    DIM fit AS ARRAY = ENV.FITNESS(e)
+    DIM order AS ARRAY = GRADE(fit * -1)             ' best first
+    DIM hb AS ARRAY = t{"hist_best"}
+    DIM hm AS ARRAY = t{"hist_mean"}
+    PUSH(hb, fit[order[0]])
+    PUSH(hm, SUM(fit) / n)
+    t{"hist_best"} = hb
+    t{"hist_mean"} = hm
+    DIM n_elite AS INTEGER = CINT(INT(n * ELITE_FRAC))
+    IF n_elite < 2 THEN n_elite = 2
+    DIM n_par AS INTEGER = CINT(INT(n * PARENT_FRAC))
+    IF n_par < 4 THEN n_par = 4
+    ' row r of the new swarm = crossover of parents ia[r] and ib[r]; for the elites both are the same car,
+    ' and they are not mutated, so they survive untouched
+    DIM ia AS ARRAY = ZEROS([n])
+    DIM ib AS ARRAY = ZEROS([n])
+    DIM keep AS ARRAY = TORCH.ZEROS_RC(n, 1)          ' 1 = this row may mutate
+    DIM r AS INTEGER = 0
+    FOR r = 0 TO n - 1
+        IF r < n_elite THEN
+            ia[r] = order[r]
+            ib[r] = order[r]
+        ELSE
+            ia[r] = order[CINT(RNG.INT(gen, 0, n_par - 1))]
+            ib[r] = order[CINT(RNG.INT(gen, 0, n_par - 1))]
+            keep[r, 0] = 1
+        ENDIF
+    NEXT r
+    DIM A AS ARRAY = G[ia]
+    DIM B AS ARRAY = G[ib]
+    DIM cross AS ARRAY = TORCH.RANDU(gen, n, BRAIN.GENOME, 0, 1) < 0.5        ' crossover: mix genes of two parents
+    DIM child AS ARRAY = cross * A + (1 - cross) * B
+    DIM mutate AS ARRAY = TORCH.RANDU(gen, n, BRAIN.GENOME, 0, 1) < MUT_RATE  ' mutation: random typos
+    DIM rowmask AS ARRAY = MATMUL(keep, TORCH.ONES_RC(1, BRAIN.GENOME))
+    DIM nw AS ARRAY = child + mutate * rowmask * TORCH.RANDN(gen, n, BRAIN.GENOME) * MUT_SIGMA
+    t{"genomes"} = nw
+    t{"brains"} = BRAIN.PREP(nw)
+    t{"generation"} = t{"generation"} + 1
+    t{"obs"} = ENV.RESET(e)
+ENDSUB
+
+' ---- info for the UI
+EXPORT FUNC LEADER(t AS MAP) AS INTEGER
+    DIM e AS MAP = t{"env"}
+    DIM i AS INTEGER = ENV.LEADER(e)
+    IF i >= 0 THEN RETURN i
+    DIM fit AS ARRAY = ENV.FITNESS(e)
+    DIM order AS ARRAY = GRADE(fit * -1)
+    RETURN CINT(order[0])
+ENDFUNC
+
+EXPORT FUNC ACTS(t AS MAP, i AS INTEGER) AS MAP
+    DIM G AS ARRAY = t{"genomes"}
+    DIM obs AS ARRAY = t{"obs"}
+    RETURN BRAIN.ACTS(G[i], obs[i])
+ENDFUNC
+
+' the leader's genome as JSON
+EXPORT FUNC SAVE_JSON$(t AS MAP)
+    DIM G AS ARRAY = t{"genomes"}
+    RETURN JSON.STRINGIFY$(G[LEADER(t)])
+ENDFUNC
+
+' every car gets the loaded genome; all but car 0 get a half-strength mutation
+EXPORT SUB LOAD_JSON(t AS MAP, text$)
+    DIM e AS MAP = t{"env"}
+    DIM gen AS INTEGER = t{"rng"}
+    DIM n AS INTEGER = t{"n"}
+    DIM one AS ARRAY = JSON.PARSE$(text$)
+    DIM row AS ARRAY = RESHAPE(one + 0, [1, BRAIN.GENOME])
+    DIM keep AS ARRAY = TORCH.ONES_RC(n, 1)
+    keep[0, 0] = 0
+    DIM mutate AS ARRAY = TORCH.RANDU(gen, n, BRAIN.GENOME, 0, 1) < MUT_RATE
+    DIM rowmask AS ARRAY = MATMUL(keep, TORCH.ONES_RC(1, BRAIN.GENOME))
+    DIM nw AS ARRAY = TORCH.REPROW(row, n) + mutate * rowmask * TORCH.RANDN(gen, n, BRAIN.GENOME) * (MUT_SIGMA * 0.5)
+    t{"genomes"} = nw
+    t{"brains"} = BRAIN.PREP(nw)
+    t{"obs"} = ENV.RESET(e)
+ENDSUB

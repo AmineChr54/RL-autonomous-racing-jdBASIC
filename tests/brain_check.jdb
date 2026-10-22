@@ -1,0 +1,29 @@
+' Writes random genomes, observations and BRAIN.FORWARD's output for tests/brain_parity.py.
+IMPORT BRAIN, TORCH
+
+SUB WriteCsv(path$, m AS ARRAY)
+    DIM i AS INTEGER = 0
+    DIM j AS INTEGER = 0
+    DIM line$ = ""
+    TXTWRITER path$, ""
+    FOR i = 0 TO LEN(m) - 1
+        line$ = ""
+        FOR j = 0 TO LEN(m[0]) - 1
+            IF j > 0 THEN line$ = line$ + ","
+            line$ = line$ + FORMAT$("{:.17g}", m[i, j])
+        NEXT j
+        TXTWRITER path$, line$ + CHR$(10), TRUE
+    NEXT i
+ENDSUB
+
+DIM gen AS INTEGER = RNG.NEW(11)
+DIM N AS INTEGER = 7
+DIM G AS ARRAY = BRAIN.RANDOM_GENOMES(N, gen) + TORCH.RANDN(gen, N, BRAIN.GENOME) * 0.1   ' non-zero biases too
+DIM obs AS ARRAY = TORCH.RANDU(gen, N, 8, 0, 1)
+DIM out AS ARRAY = BRAIN.FORWARD(BRAIN.PREP(G), obs)
+WriteCsv("tests/out/brain_g.csv", G)
+WriteCsv("tests/out/brain_obs.csv", obs)
+WriteCsv("tests/out/brain_out.csv", out)
+DIM acts AS MAP = BRAIN.ACTS(G[3], obs[3])
+DIM last AS ARRAY = acts{"3"}
+PRINT "genome size "; BRAIN.GENOME_SIZE(); "  acts layers "; acts{"n"}; "  acts[3] vs forward row 3: "; ABS(last[0] - out[3, 0]) + ABS(last[1] - out[3, 1])

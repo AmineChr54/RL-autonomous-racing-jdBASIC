@@ -1,0 +1,157 @@
+' Checks every TORCH op's gradient against central finite differences.
+'   jdBasic tests/torch_gradcheck.jdb        (from the project root)
+IMPORT TORCH, RAND
+
+DIM gen = RAND.GENERATOR(7)
+DIM pa = TORCH.PARAM(TORCH.RANDN(gen, 3, 4))
+DIM pb = TORCH.PARAM(TORCH.RANDN(gen, 4, 2))
+DIM pc = TORCH.PARAM(TORCH.RANDN(gen, 3, 4))
+DIM prow = TORCH.PARAM(TORCH.RANDN(gen, 1, 4) * 0.5)
+DIM acts = TORCH.RANDN(gen, 3, 4)
+DIM target = TORCH.RANDN(gen, 3, 4) * 2.0
+DIM gidx = [2, 0, 3]
+DIM net = TORCH.MLP_NEW([4, 5, 3], gen)
+DIM upstream = {}
+DIM NCASES AS INTEGER = 20
+DIM names$ = ["MM", "ADDROW", "MULROW", "ADD", "MINUS", "MUL", "SCALE", "ADDS", "TTANH", "TEXP", _
+              "SQUARE", "TMEAN", "TSUM", "ROWSUM", "MINIMUM", "TCLAMP", "GATHERCOL", "SMOOTH_L1", "NORMAL_LOGP", "MLP_FWD"]
+
+' the graph for case k, before the random projection to a scalar
+FUNC Graph(k AS INTEGER)
+    DIM a = TORCH.P(pa)
+    SWITCH k
+        CASE 0
+            RETURN TORCH.MM(a, TORCH.P(pb))
+        CASE 1
+            RETURN TORCH.ADDROW(a, TORCH.P(prow))
+        CASE 2
+            RETURN TORCH.MULROW(a, TORCH.P(prow))
+        CASE 3
+            RETURN TORCH.ADD(a, TORCH.P(pc))
+        CASE 4
+            RETURN TORCH.MINUS(a, TORCH.P(pc))
+        CASE 5
+            RETURN TORCH.MUL(a, TORCH.P(pc))
+        CASE 6
+            RETURN TORCH.SCALE(a, -1.7)
+        CASE 7
+            RETURN TORCH.ADDS(a, 0.3)
+        CASE 8
+            RETURN TORCH.TTANH(a)
+        CASE 9
+            RETURN TORCH.TEXP(a)
+        CASE 10
+            RETURN TORCH.SQUARE(a)
+        CASE 11
+            RETURN TORCH.TMEAN(TORCH.MUL(a, TORCH.P(pc)))
+        CASE 12
+            RETURN TORCH.TSUM(TORCH.MUL(a, TORCH.P(pc)))
+        CASE 13
+            RETURN TORCH.ROWSUM(a)
+        CASE 14
+            RETURN TORCH.MINIMUM(a, TORCH.P(pc))
+        CASE 15
+            RETURN TORCH.TCLAMP(a, -0.5, 0.5)
+        CASE 16
+            RETURN TORCH.GATHERCOL(a, gidx)
+        CASE 17
+            RETURN TORCH.SMOOTH_L1(a, target)
+        CASE 18
+            RETURN TORCH.NORMAL_LOGP(TORCH.C(acts), a, TORCH.P(prow))
+        CASE 19
+            RETURN TORCH.MLP_FWD(net, a)
+    ENDSWITCH
+    RETURN a
+ENDFUNC
+
+' scalar loss = sum(Graph(k) * fixed random weights)
+FUNC Loss(k AS INTEGER)
+    TORCH.RESET()
+    DIM out = Graph(k)
+    DIM v = TORCH.VALUE(out)
+    DIM key$ = STR$(k)
+    IF NOT MAP.EXISTS(upstream, key$) THEN
+        upstream{key$} = TORCH.RANDN(gen, TORCH.NROWS(v), TORCH.NCOLS(v))
+    ENDIF
+    RETURN TORCH.TSUM(TORCH.MUL(out, TORCH.C(upstream{key$})))
+ENDFUNC
+
+' max relative error between the analytic gradient of pid and finite differences
+FUNC CheckParam(k AS INTEGER, pid)
+    DIM all_pids = APPEND([pa, pb, pc, prow], TORCH.MLP_PIDS(net))
+    TORCH.ZERO_GRAD(all_pids)
+    DIM l = Loss(k)
+    TORCH.BACKWARD(l)
+    DIM g = TORCH.PGRAD(pid)
+    DIM w = TORCH.PVAL(pid)
+    DIM nr AS INTEGER = TORCH.NROWS(w)
+    DIM nc AS INTEGER = TORCH.NCOLS(w)
+    DIM worst AS DOUBLE = 0.0
+    DIM i AS INTEGER = 0
+    DIM j AS INTEGER = 0
+    DIM h AS DOUBLE = 0.00001
+    DIM orig AS DOUBLE = 0.0
+    DIM lp AS DOUBLE = 0.0
+    DIM lm AS DOUBLE = 0.0
+    DIM num AS DOUBLE = 0.0
+    DIM err AS DOUBLE = 0.0
+    FOR i = 0 TO nr - 1
+        FOR j = 0 TO nc - 1
+            orig = w[i, j]
+            w[i, j] = orig + h
+            lp = TORCH.ITEM(Loss(k))
+            w[i, j] = orig - h
+            lm = TORCH.ITEM(Loss(k))
+            w[i, j] = orig
+            num = (lp - lm) / (2 * h)
+            err = ABS(num - g[i, j]) / (ABS(num) + ABS(g[i, j]) + 0.000001)
+            IF err > worst THEN worst = err
+        NEXT j
+    NEXT i
+    RETURN worst
+ENDFUNC
+
+DIM k AS INTEGER = 0
+DIM fails AS INTEGER = 0
+DIM e AS DOUBLE = 0.0
+DIM worst AS DOUBLE = 0.0
+DIM pidlist = [pa, pb, pc, prow]
+DIM pnames$ = ["a", "b", "c", "row"]
+DIM q AS INTEGER = 0
+DIM used AS INTEGER = 0
+DIM line$ = ""
+FOR k = 0 TO NCASES - 1
+    worst = 0.0
+    line$ = ""
+    FOR q = 0 TO 3
+        used = 0
+        IF q = 0 THEN used = 1
+        IF q = 1 AND k = 0 THEN used = 1
+        IF q = 2 AND (k >= 3 AND k <= 5 OR k = 11 OR k = 12 OR k = 14) THEN used = 1
+        IF q = 3 AND (k = 1 OR k = 2 OR k = 18) THEN used = 1
+        IF used = 1 THEN
+            e = CheckParam(k, pidlist[q])
+            line$ = line$ + " d/d" + pnames$[q] + " " + FORMAT$("{:.2e}", e)
+            IF e > worst THEN worst = e
+        ENDIF
+    NEXT q
+    IF k = 19 THEN
+        FOR q = 0 TO 3
+            e = CheckParam(k, TORCH.MLP_PIDS(net)[q])
+            line$ = line$ + " d/dW" + STR$(q) + " " + FORMAT$("{:.2e}", e)
+            IF e > worst THEN worst = e
+        NEXT q
+    ENDIF
+    IF worst > 0.0001 THEN
+        fails = fails + 1
+        PRINT "FAIL "; names$[k]; line$
+    ELSE
+        PRINT "ok   "; names$[k]; line$
+    ENDIF
+NEXT k
+IF fails = 0 THEN
+    PRINT "gradcheck: all "; NCASES; " ops PASS"
+ELSE
+    PRINT "gradcheck: "; fails; " FAILED"
+    END 1
+ENDIF

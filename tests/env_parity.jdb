@@ -1,0 +1,40 @@
+' Drives ENV with a fixed action script (no start noise) and writes a trace for tests/env_parity.py.
+IMPORT TRACK, ENV
+
+DIM NCARS AS INTEGER = 20
+DIM NTICKS AS INTEGER = 300
+DIM tr AS MAP = TRACK.NEW("hard")
+DIM e AS MAP = ENV.NEW(tr, NCARS, 200, 0)
+e{"noise"} = 0
+DIM obs AS ARRAY = ENV.RESET(e)
+DIM act = ZEROS([NCARS, 2])
+DIM t AS INTEGER = 0
+DIM i AS INTEGER = 0
+DIM k AS INTEGER = 0
+DIM out$ = ""
+DIM line$ = ""
+TXTWRITER "tests/out/env_jd.csv", ""
+FOR t = 0 TO NTICKS - 1
+    ' cars 0-3 brake (-> "stuck"), the others steer toward open space (-> long drives, timeouts)
+    FOR i = 0 TO NCARS - 1
+        act[i, 0] = CSNG((obs[i, 4] + obs[i, 5] + obs[i, 6] - obs[i, 0] - obs[i, 1] - obs[i, 2]) * (1.5 + 0.1 * i))
+        IF i < 4 THEN
+            act[i, 1] = -1.0
+        ELSE
+            act[i, 1] = CSNG(0.15 + 0.02 * i)
+        ENDIF
+    NEXT i
+    obs = ENV.TICK(e, act)
+    ' one block per tick, appended: under -c every temporary of out$ = out$ + ... leaks, a 1 MB string costs > 1 GB
+    out$ = ""
+    FOR i = 0 TO NCARS - 1
+        line$ = STR$(t) + "," + STR$(i)
+        FOR k = 0 TO 7
+            line$ = line$ + "," + FORMAT$("{:.9g}", obs[i, k])
+        NEXT k
+        line$ = line$ + "," + FORMAT$("{:.9g}", e{"reward"}[i]) + "," + STR$(e{"done"}[i]) + "," + FORMAT$("{:.9g}", e{"progress"}[i])
+        out$ = out$ + line$ + CHR$(10)
+    NEXT i
+    TXTWRITER "tests/out/env_jd.csv", out$, TRUE
+NEXT t
+PRINT "wrote tests/out/env_jd.csv"

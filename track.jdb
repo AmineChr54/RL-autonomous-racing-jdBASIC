@@ -1,0 +1,202 @@
+' track.jdb - the race track: a closed loop described by a centerline, plus fast lookup maps.
+'
+' Everything the cars need to know about the world is precomputed here as flat arrays
+' (index = y * WORLD_W + x):
+'   mask[i] -> 1 if that pixel is road, 0 if it is wall/grass
+'   idx[i]  -> index of the nearest centerline point (tells us how far along the track a car is)
+'
+' A track is a map: name, width, n, ds, length, cx, cy, heading, mask, idx.
+
+EXPORT MODULE TRACK
+
+EXPORT CONST WORLD_W = 1000
+EXPORT CONST WORLD_H = 700
+CONST SAMPLES_PER_SEG = 60
+
+' Control points the smooth curve passes through (closed loop), as flat x, y pairs.
+FUNC ControlPoints(name$) AS ARRAY
+    IF name$ = "easy" THEN
+        ' gentle loop: wide road, no sharp corners
+        RETURN [170, 350, 215, 180, 380, 120, 520, 230, 650, 100, 840, 150, _
+                910, 330, 800, 490, 850, 600, 640, 620, 500, 520, 350, 620, 200, 560]
+    ENDIF
+    ' harder: narrower road, a hairpin, an S-chicane and a long fast straight
+    RETURN [120, 560, 120, 300, 200, 130, 330, 90, 420, 180, 360, 300, 470, 380, _
+            600, 300, 700, 120, 880, 110, 940, 220, 830, 300, 760, 400, _
+            900, 470, 930, 600, 760, 640, 640, 560, 540, 640, 380, 600, 260, 650]
+ENDFUNC
+
+FUNC RoadWidth(name$) AS DOUBLE
+    IF name$ = "easy" THEN
+        RETURN 70
+    ENDIF
+    RETURN 54
+ENDFUNC
+
+' Closed Catmull-Rom spline through the control points -> [xs, ys], SAMPLES_PER_SEG points per segment.
+FUNC CatmullRomClosed(pts AS ARRAY) AS ARRAY
+    DIM n AS INTEGER = LEN(pts) \ 2
+    DIM total AS INTEGER = n * SAMPLES_PER_SEG
+    DIM xs = ZEROS([total])
+    DIM ys = ZEROS([total])
+    DIM i AS INTEGER = 0
+    DIM j AS INTEGER = 0
+    DIM k AS INTEGER = 0
+    DIM i0 AS INTEGER = 0
+    DIM i2 AS INTEGER = 0
+    DIM i3 AS INTEGER = 0
+    DIM t AS DOUBLE = 0.0
+    DIM t2 AS DOUBLE = 0.0
+    DIM t3 AS DOUBLE = 0.0
+    DIM dstep AS DOUBLE = 1.0 / SAMPLES_PER_SEG
+    DIM c AS INTEGER = 0
+    DIM p0 AS DOUBLE = 0.0
+    DIM p1 AS DOUBLE = 0.0
+    DIM p2 AS DOUBLE = 0.0
+    DIM p3 AS DOUBLE = 0.0
+    DIM v AS DOUBLE = 0.0
+    FOR i = 0 TO n - 1
+        i0 = (i - 1 + n) MOD n
+        i2 = (i + 1) MOD n
+        i3 = (i + 2) MOD n
+        FOR j = 0 TO SAMPLES_PER_SEG - 1
+            t = j * dstep
+            t2 = t * t
+            t3 = t2 * t
+            FOR c = 0 TO 1
+                p0 = pts[i0 * 2 + c]
+                p1 = pts[i * 2 + c]
+                p2 = pts[i2 * 2 + c]
+                p3 = pts[i3 * 2 + c]
+                v = 0.5 * ((2 * p1) + (-p0 + p2) * t + (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 _
+                           + (-p0 + 3 * p1 - 3 * p2 + p3) * t3)
+                IF c = 0 THEN
+                    xs[k] = v
+                ELSE
+                    ys[k] = v
+                ENDIF
+            NEXT c
+            k = k + 1
+        NEXT j
+    NEXT i
+    RETURN [xs, ys]
+ENDFUNC
+
+' Re-sample a closed polyline so points are `spacing` pixels apart -> [xs, ys, ds].
+FUNC ResampleUniform(xs AS ARRAY, ys AS ARRAY, spacing AS DOUBLE) AS ARRAY
+    DIM m AS INTEGER = LEN(xs)
+    DIM cum = ZEROS([m + 1])
+    DIM i AS INTEGER = 0
+    DIM nx AS DOUBLE = 0.0
+    DIM ny AS DOUBLE = 0.0
+    FOR i = 0 TO m - 1
+        nx = xs[(i + 1) MOD m] - xs[i]
+        ny = ys[(i + 1) MOD m] - ys[i]
+        cum[i + 1] = cum[i] + SQR(nx * nx + ny * ny)
+    NEXT i
+    DIM total AS DOUBLE = cum[m]
+    DIM n AS INTEGER = CINT(INT(total / spacing))
+    DIM dstep AS DOUBLE = total / n
+    DIM ox = ZEROS([n])
+    DIM oy = ZEROS([n])
+    DIM k AS INTEGER = 0
+    DIM s AS DOUBLE = 0.0
+    DIM f AS DOUBLE = 0.0
+    DIM k2 AS INTEGER = 0
+    FOR i = 0 TO n - 1
+        s = i * dstep
+        WHILE cum[k + 1] <= s AND k < m - 1
+            k = k + 1
+        WEND
+        k2 = (k + 1) MOD m
+        f = (s - cum[k]) / (cum[k + 1] - cum[k])
+        ox[i] = xs[k] + f * (xs[k2] - xs[k])
+        oy[i] = ys[k] + f * (ys[k2] - ys[k])
+    NEXT i
+    RETURN [ox, oy, dstep]
+ENDFUNC
+
+' road mask + nearest-centerline index map, same windowed search as the Python version
+SUB BuildMaps(tr AS MAP)
+    DIM W AS INTEGER = WORLD_W
+    DIM H AS INTEGER = WORLD_H
+    DIM r AS DOUBLE = tr{"width"} / 2.0
+    DIM rr AS DOUBLE = r * r
+    DIM win AS INTEGER = CINT(INT(r)) + 3
+    DIM cx AS ARRAY = tr{"cx"}
+    DIM cy AS ARRAY = tr{"cy"}
+    DIM n AS INTEGER = tr{"n"}
+    DIM best = ZEROS([W * H]) + 1000000000.0
+    DIM idx = ZEROS([W * H])
+    DIM i AS INTEGER = 0
+    DIM x AS INTEGER = 0
+    DIM y AS INTEGER = 0
+    DIM x0 AS INTEGER = 0
+    DIM x1 AS INTEGER = 0
+    DIM y0 AS INTEGER = 0
+    DIM y1 AS INTEGER = 0
+    DIM px AS DOUBLE = 0.0
+    DIM py AS DOUBLE = 0.0
+    DIM d2 AS DOUBLE = 0.0
+    DIM dy2 AS DOUBLE = 0.0
+    DIM p AS INTEGER = 0
+    FOR i = 0 TO n - 1
+        px = cx[i]
+        py = cy[i]
+        x0 = CINT(px) - win
+        IF x0 < 0 THEN x0 = 0
+        x1 = CINT(px) + win + 1
+        IF x1 > W THEN x1 = W
+        y0 = CINT(py) - win
+        IF y0 < 0 THEN y0 = 0
+        y1 = CINT(py) + win + 1
+        IF y1 > H THEN y1 = H
+        FOR y = y0 TO y1 - 1
+            dy2 = (y - py) * (y - py)
+            p = y * W
+            FOR x = x0 TO x1 - 1
+                d2 = (x - px) * (x - px) + dy2
+                IF d2 < best[p + x] THEN
+                    best[p + x] = CSNG(d2)      ' the Python map is float32
+                    idx[p + x] = i
+                ENDIF
+            NEXT x
+        NEXT y
+    NEXT i
+    DIM mask = ZEROS([W * H])
+    FOR p = 0 TO W * H - 1
+        IF best[p] <= rr THEN mask[p] = 1
+    NEXT p
+    tr{"mask"} = mask
+    tr{"idx"} = idx
+ENDSUB
+
+EXPORT FUNC NEW(name$, spacing = 4.0) AS MAP
+    DIM tr = {}
+    tr{"name"} = name$
+    tr{"width"} = RoadWidth(name$)
+    DIM raw AS ARRAY = CatmullRomClosed(ControlPoints(name$))
+    DIM res AS ARRAY = ResampleUniform(raw[0], raw[1], spacing)
+    DIM cx AS ARRAY = res[0]
+    DIM cy AS ARRAY = res[1]
+    DIM n AS INTEGER = LEN(cx)
+    tr{"cx"} = cx
+    tr{"cy"} = cy
+    tr{"ds"} = res[2]           ' real spacing between points
+    tr{"n"} = n
+    tr{"length"} = n * res[2]
+    ' heading of the track at each centerline point
+    DIM hd = ZEROS([n])
+    DIM i AS INTEGER = 0
+    FOR i = 0 TO n - 1
+        hd[i] = ATAN2(cy[(i + 1) MOD n] - cy[i], cx[(i + 1) MOD n] - cx[i])
+    NEXT i
+    tr{"heading"} = hd
+    BuildMaps(tr)
+    RETURN tr
+ENDFUNC
+
+' [x, y, heading] of centerline point i
+EXPORT FUNC START_POSE(tr AS MAP, i = 0) AS ARRAY
+    RETURN [tr{"cx"}[i], tr{"cy"}[i], tr{"heading"}[i]]
+ENDFUNC

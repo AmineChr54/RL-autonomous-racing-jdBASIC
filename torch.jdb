@@ -1,0 +1,600 @@
+' torch.jdb - a small PyTorch in plain jdBasic: reverse-mode autograd on a tape, MLPs, Adam.
+'
+' jdBasic ships no autodiff, so this module records every operation of a forward pass on a
+' tape and walks it backwards to get the gradients, exactly like torch.autograd does. The maths
+' runs on the C++ array builtins (MATMUL is Eigen, TANH / EXP are vectorised).
+'
+'   IMPORT TORCH
+'   DIM net = TORCH.MLP_NEW([8, 32, 32, 2], gen)
+'   DIM opt = TORCH.ADAM_NEW(TORCH.MLP_PIDS(net), 0.001)
+'   TORCH.RESET()                                     ' start a new tape
+'   DIM x = TORCH.C(obs)                              ' a constant (N x 8)
+'   DIM loss = TORCH.TMEAN(TORCH.SQUARE(TORCH.MINUS(TORCH.MLP_FWD(net, x), TORCH.C(target))))
+'   TORCH.ZERO_GRAD(TORCH.MLP_PIDS(net))
+'   TORCH.BACKWARD(loss)
+'   TORCH.ADAM_STEP(opt)
+'
+' Rules that keep it identical in the interpreter and under -c:
+'   * every tensor is 2-D (a row vector is 1 x k, a scalar 1 x 1);
+'   * element-wise ops take two tensors of the same shape - broadcasting a row is explicit
+'     (BCASTROW / ADDROW / MULROW, done with a MATMUL against a column of ones).
+' Parameters (weights) live outside the tape and are addressed by a pid; P(pid) puts one on it.
+
+EXPORT MODULE TORCH
+IMPORT RAND
+
+CONST OP_CONST = 0
+CONST OP_PARAM = 1
+CONST OP_MATMUL = 2
+CONST OP_BCASTROW = 3
+CONST OP_ADD = 4
+CONST OP_SUB = 5
+CONST OP_MUL = 6
+CONST OP_SCALE = 7
+CONST OP_ADDS = 8
+CONST OP_TANH = 9
+CONST OP_EXP = 10
+CONST OP_SQUARE = 11
+CONST OP_MEAN = 12
+CONST OP_SUM = 13
+CONST OP_ROWSUM = 14
+CONST OP_MIN2 = 15
+CONST OP_CLAMP = 16
+CONST OP_GATHERCOL = 17
+CONST OP_SMOOTHL1 = 18
+
+CONST HALF_LOG_2PI = 0.9189385332046727
+
+' the tape: node id -> {"op", "a", "b", "k", "k2", "v", "aux", "r", "c"}
+DIM gNodes = {}
+DIM gGrads = {}
+DIM gCount = 0
+' parameters: pid -> value, grad, Adam moments
+DIM gPVal = {}
+DIM gPGrad = {}
+DIM gPM = {}
+DIM gPV = {}
+DIM gPCount = 0
+' the aux slot of a node that needs none (under -c every slot of a node keeps one kind)
+DIM NOAUX = ZEROS([1])
+
+' ─────────────────────────────────────────────────────────── helpers
+
+EXPORT FUNC NROWS(m AS ARRAY) AS INTEGER
+    RETURN LEN(m)
+ENDFUNC
+
+EXPORT FUNC NCOLS(m AS ARRAY) AS INTEGER
+    RETURN LEN(m[0])
+ENDFUNC
+
+' ONES / ZEROS of r x c. Under -c a shape list built from map values ([m{"r"}, m{"c"}]) crashes,
+' and ZEROS / ONES with a 2-D shape take memory quadratic in the rows (15000 x 8 needs > 800 MB),
+' so every 2-D shape goes through these: a flat array, cast to integers, then RESHAPE.
+EXPORT FUNC ONES_RC(r, c) AS ARRAY
+    DIM ri AS INTEGER = CINT(r)
+    DIM ci AS INTEGER = CINT(c)
+    RETURN RESHAPE(ONES([ri * ci]), [ri, ci])
+ENDFUNC
+
+EXPORT FUNC ZEROS_RC(r, c) AS ARRAY
+    DIM ri AS INTEGER = CINT(r)
+    DIM ci AS INTEGER = CINT(c)
+    RETURN RESHAPE(ZEROS([ri * ci]), [ri, ci])
+ENDFUNC
+
+' a 1 x 1 matrix holding x
+FUNC Scalar11(x) AS ARRAY
+    DIM s = ZEROS([1, 1])
+    s[0, 0] = x
+    RETURN s
+ENDFUNC
+
+' n x k matrix of N(0, 1) draws (Box-Muller on RNG.FILL, one pair of uniforms per value as RAND.NORMAL)
+' (RAND.DRAWS(gen, "normal", n) would pass sigma 0 by default and return zeros)
+EXPORT FUNC RANDN(gen, nr, nc) AS ARRAY
+    DIM n AS INTEGER = CINT(nr) * CINT(nc)
+    DIM u = RNG.FILL(gen, 2 * n)
+    DIM u1 = 1.0 - u[IOTA(n) * 2 - 2]
+    DIM u2 = u[IOTA(n) * 2 - 1]
+    DIM z = SQR(LOG(u1) * -2.0) * COS(u2 * 6.283185307179586)
+    RETURN RESHAPE(z, [CINT(nr), CINT(nc)])
+ENDFUNC
+
+' n x k matrix of U(lo, hi) draws
+EXPORT FUNC RANDU(gen, nr, nc, lo, hi) AS ARRAY
+    DIM n AS INTEGER = CINT(nr) * CINT(nc)
+    DIM u = RNG.FILL(gen, n)
+    RETURN RESHAPE(u * (hi - lo) + lo, [CINT(nr), CINT(nc)])
+ENDFUNC
+
+' a 1 x k row repeated n times -> n x k   (explicit broadcast, portable across backends)
+EXPORT FUNC REPROW(row AS ARRAY, nr) AS ARRAY
+    RETURN MATMUL(ONES_RC(nr, 1), row)
+ENDFUNC
+
+' sum over the columns -> n x 1
+EXPORT FUNC SUMCOLS(m AS ARRAY) AS ARRAY
+    RETURN MATMUL(m, ONES_RC(NCOLS(m), 1))
+ENDFUNC
+
+' sum over the rows -> 1 x k
+EXPORT FUNC SUMROWS(m AS ARRAY) AS ARRAY
+    RETURN MATMUL(ONES_RC(1, NROWS(m)), m)
+ENDFUNC
+
+' ─────────────────────────────────────────────────────────── the tape
+
+EXPORT SUB RESET()
+    gNodes = {}
+    gGrads = {}
+    gCount = 0
+ENDSUB
+
+FUNC Push(op, a, b, k, k2, v AS ARRAY, aux AS ARRAY) AS INTEGER
+    DIM nd = {}
+    nd{"op"} = op
+    nd{"a"} = a
+    nd{"b"} = b
+    nd{"k"} = k
+    nd{"k2"} = k2
+    nd{"v"} = v
+    nd{"aux"} = aux
+    nd{"r"} = LEN(v)
+    nd{"c"} = LEN(v[0])
+    DIM id = gCount
+    gNodes{STR$(id)} = nd
+    gCount = gCount + 1
+    RETURN id
+ENDFUNC
+
+EXPORT FUNC VALUE(id) AS ARRAY
+    RETURN gNodes{STR$(id)}{"v"}
+ENDFUNC
+
+EXPORT FUNC ITEM(id) AS DOUBLE
+    DIM v AS ARRAY = gNodes{STR$(id)}{"v"}
+    RETURN v[0, 0]
+ENDFUNC
+
+EXPORT FUNC GRAD(id) AS ARRAY
+    RETURN gGrads{STR$(id)}
+ENDFUNC
+
+EXPORT FUNC TAPE_SIZE() AS INTEGER
+    RETURN gCount
+ENDFUNC
+
+' a constant: no gradient flows into it
+EXPORT FUNC C(arr AS ARRAY) AS INTEGER
+    RETURN Push(OP_CONST, -1, -1, 0, 0, arr, NOAUX)
+ENDFUNC
+
+' a parameter on the tape; its gradient accumulates into PGRAD(pid)
+EXPORT FUNC P(pid) AS INTEGER
+    RETURN Push(OP_PARAM, pid, -1, 0, 0, gPVal{STR$(pid)}, NOAUX)
+ENDFUNC
+
+EXPORT FUNC MM(a, b) AS INTEGER
+    RETURN Push(OP_MATMUL, a, b, 0, 0, MATMUL(VALUE(a), VALUE(b)), NOAUX)
+ENDFUNC
+
+' row (1 x k) repeated to nr rows
+EXPORT FUNC BCASTROW(row, nr) AS INTEGER
+    RETURN Push(OP_BCASTROW, row, -1, nr, 0, REPROW(VALUE(row), nr), NOAUX)
+ENDFUNC
+
+EXPORT FUNC ADD(a, b) AS INTEGER
+    RETURN Push(OP_ADD, a, b, 0, 0, VALUE(a) + VALUE(b), NOAUX)
+ENDFUNC
+
+EXPORT FUNC MINUS(a, b) AS INTEGER
+    RETURN Push(OP_SUB, a, b, 0, 0, VALUE(a) - VALUE(b), NOAUX)
+ENDFUNC
+
+EXPORT FUNC MUL(a, b) AS INTEGER
+    RETURN Push(OP_MUL, a, b, 0, 0, VALUE(a) * VALUE(b), NOAUX)
+ENDFUNC
+
+' a + row, the row broadcast over every row of a (a Linear layer's bias)
+EXPORT FUNC ADDROW(a, row) AS INTEGER
+    RETURN ADD(a, BCASTROW(row, gNodes{STR$(a)}{"r"}))
+ENDFUNC
+
+' a * row, the row broadcast over every row of a
+EXPORT FUNC MULROW(a, row) AS INTEGER
+    RETURN MUL(a, BCASTROW(row, gNodes{STR$(a)}{"r"}))
+ENDFUNC
+
+EXPORT FUNC SCALE(a, k) AS INTEGER
+    RETURN Push(OP_SCALE, a, -1, k, 0, VALUE(a) * k, NOAUX)
+ENDFUNC
+
+EXPORT FUNC ADDS(a, k) AS INTEGER
+    RETURN Push(OP_ADDS, a, -1, k, 0, VALUE(a) + k, NOAUX)
+ENDFUNC
+
+EXPORT FUNC NEG(a) AS INTEGER
+    RETURN SCALE(a, -1)
+ENDFUNC
+
+EXPORT FUNC TTANH(a) AS INTEGER
+    RETURN Push(OP_TANH, a, -1, 0, 0, TANH(VALUE(a)), NOAUX)
+ENDFUNC
+
+EXPORT FUNC TEXP(a) AS INTEGER
+    RETURN Push(OP_EXP, a, -1, 0, 0, EXP(VALUE(a)), NOAUX)
+ENDFUNC
+
+EXPORT FUNC SQUARE(a) AS INTEGER
+    DIM v = VALUE(a)
+    RETURN Push(OP_SQUARE, a, -1, 0, 0, v * v, NOAUX)
+ENDFUNC
+
+' mean of every element -> 1 x 1
+EXPORT FUNC TMEAN(a) AS INTEGER
+    DIM nd = gNodes{STR$(a)}
+    DIM cnt = nd{"r"} * nd{"c"}
+    RETURN Push(OP_MEAN, a, -1, cnt, 0, Scalar11(SUM(nd{"v"}) / cnt), NOAUX)
+ENDFUNC
+
+' sum of every element -> 1 x 1
+EXPORT FUNC TSUM(a) AS INTEGER
+    RETURN Push(OP_SUM, a, -1, 0, 0, Scalar11(SUM(VALUE(a))), NOAUX)
+ENDFUNC
+
+' sum over the last axis: n x k -> n x 1   (torch .sum(-1), kept as a column)
+EXPORT FUNC ROWSUM(a) AS INTEGER
+    RETURN Push(OP_ROWSUM, a, -1, 0, 0, SUMCOLS(VALUE(a)), NOAUX)
+ENDFUNC
+
+' element-wise minimum (torch.min(a, b)); a tie sends half the gradient each way, as torch does
+EXPORT FUNC MINIMUM(a, b) AS INTEGER
+    DIM va = VALUE(a)
+    DIM vb = VALUE(b)
+    DIM lt AS ARRAY = va < vb
+    RETURN Push(OP_MIN2, a, b, 0, 0, lt * va + (1 - lt) * vb, NOAUX)
+ENDFUNC
+
+EXPORT FUNC TCLAMP(a, lo, hi) AS INTEGER
+    RETURN Push(OP_CLAMP, a, -1, lo, hi, CLAMP(VALUE(a), lo, hi), NOAUX)
+ENDFUNC
+
+' picks a[i, idx[i]] for every row -> n x 1   (torch .gather(1, idx[:, None]))
+EXPORT FUNC GATHERCOL(a, idx AS ARRAY) AS INTEGER
+    DIM v = VALUE(a)
+    DIM nr = LEN(v)
+    DIM out = ZEROS_RC(nr, 1)
+    DIM i = 0
+    FOR i = 0 TO nr - 1
+        out[i, 0] = v[i, CINT(idx[i])]
+    NEXT i
+    RETURN Push(OP_GATHERCOL, a, -1, 0, 0, out, idx)
+ENDFUNC
+
+' mean Huber loss with beta 1 against a constant target of the same shape (F.smooth_l1_loss)
+EXPORT FUNC SMOOTH_L1(a, target AS ARRAY) AS INTEGER
+    DIM d AS ARRAY = VALUE(a) - target
+    DIM ad AS ARRAY = ABS(d)
+    DIM small AS ARRAY = ad < 1
+    DIM el AS ARRAY = small * (d * d * 0.5) + (1 - small) * (ad - 0.5)
+    DIM nd = gNodes{STR$(a)}
+    DIM cnt = nd{"r"} * nd{"c"}
+    DIM dg AS ARRAY = CLAMP(d, -1, 1)
+    RETURN Push(OP_SMOOTHL1, a, -1, cnt, 0, Scalar11(SUM(el) / cnt), dg)
+ENDFUNC
+
+' log-density of a Normal(mean, exp(log_std)) at the actions a, summed over the action dims -> n x 1
+' a, mu: n x k nodes; log_std: a 1 x k node
+EXPORT FUNC NORMAL_LOGP(a, mu, log_std) AS INTEGER
+    DIM nr = gNodes{STR$(a)}{"r"}
+    DIM z = MULROW(MINUS(a, mu), TEXP(NEG(log_std)))
+    DIM el = MINUS(SCALE(SQUARE(z), -0.5), BCASTROW(log_std, nr))
+    RETURN ADDS(ROWSUM(el), -HALF_LOG_2PI * gNodes{STR$(a)}{"c"})
+ENDFUNC
+
+' ─────────────────────────────────────────────────────────── backward
+
+SUB Acc(id, g AS ARRAY)
+    DIM key$ = STR$(id)
+    IF MAP.EXISTS(gGrads, key$) THEN
+        gGrads{key$} = gGrads{key$} + g
+    ELSE
+        gGrads{key$} = g
+    ENDIF
+ENDSUB
+
+' d(out)/d(every node) for a 1 x 1 output; parameter gradients accumulate into PGRAD
+EXPORT SUB BACKWARD(out)
+    gGrads = {}
+    gGrads{STR$(out)} = ONES([1, 1])
+    DIM id = out
+    DIM key$ = ""
+    DIM nd = {}
+    ' typed + CINT: under -c a map value read into an untyped local never matches a SWITCH CASE
+    DIM op AS INTEGER = 0
+    DIM a AS INTEGER = 0
+    DIM b AS INTEGER = 0
+    DIM k AS DOUBLE = 0.0
+    DIM k2 AS DOUBLE = 0.0
+    ' locals that hold arrays need an array initializer: under -c `DIM x = 0` types x as a number
+    ' for good, and assigning an array to it silently gives 0
+    DIM gr = ZEROS([1, 1])
+    DIM va = ZEROS([1, 1])
+    DIM vb = ZEROS([1, 1])
+    DIM y = ZEROS([1, 1])
+    DIM m = ZEROS([1, 1])
+    DIM pk$ = ""
+    DIM i = 0
+    DIM idx = ZEROS([1])
+    FOR id = out TO 0 STEP -1
+        key$ = STR$(id)
+        IF MAP.EXISTS(gGrads, key$) THEN
+            nd = gNodes{key$}
+            op = CINT(nd{"op"})
+            a = CINT(nd{"a"})
+            b = CINT(nd{"b"})
+            k = nd{"k"}
+            k2 = nd{"k2"}
+            gr = gGrads{key$}
+            SWITCH op
+                CASE OP_CONST
+                    ' nothing flows further
+                CASE OP_PARAM
+                    pk$ = STR$(a)
+                    gPGrad{pk$} = gPGrad{pk$} + gr
+                CASE OP_MATMUL
+                    va = VALUE(a)
+                    vb = VALUE(b)
+                    Acc(a, MATMUL(gr, TRANSPOSE(vb)))
+                    Acc(b, MATMUL(TRANSPOSE(va), gr))
+                CASE OP_BCASTROW
+                    Acc(a, SUMROWS(gr))
+                CASE OP_ADD
+                    Acc(a, gr)
+                    Acc(b, gr)
+                CASE OP_SUB
+                    Acc(a, gr)
+                    Acc(b, gr * -1)
+                CASE OP_MUL
+                    Acc(a, gr * VALUE(b))
+                    Acc(b, gr * VALUE(a))
+                CASE OP_SCALE
+                    Acc(a, gr * k)
+                CASE OP_ADDS
+                    Acc(a, gr)
+                CASE OP_TANH
+                    y = nd{"v"}
+                    Acc(a, gr * (1 - y * y))
+                CASE OP_EXP
+                    Acc(a, gr * nd{"v"})
+                CASE OP_SQUARE
+                    Acc(a, gr * VALUE(a) * 2)
+                CASE OP_MEAN
+                    Acc(a, ONES_RC(gNodes{STR$(a)}{"r"}, gNodes{STR$(a)}{"c"}) * (gr[0, 0] / k))
+                CASE OP_SUM
+                    Acc(a, ONES_RC(gNodes{STR$(a)}{"r"}, gNodes{STR$(a)}{"c"}) * gr[0, 0])
+                CASE OP_ROWSUM
+                    Acc(a, MATMUL(gr, ONES_RC(1, gNodes{STR$(a)}{"c"})))
+                CASE OP_MIN2
+                    va = VALUE(a)
+                    vb = VALUE(b)
+                    m = (va >= vb) * (va <= vb) * 0.5
+                    Acc(a, gr * ((va < vb) + m))
+                    Acc(b, gr * ((va > vb) + m))
+                CASE OP_CLAMP
+                    va = VALUE(a)
+                    Acc(a, gr * ((va >= k) * (va <= k2)))
+                CASE OP_GATHERCOL
+                    idx = nd{"aux"}
+                    m = ZEROS_RC(gNodes{STR$(a)}{"r"}, gNodes{STR$(a)}{"c"})
+                    FOR i = 0 TO LEN(idx) - 1
+                        m[i, CINT(idx[i])] = m[i, CINT(idx[i])] + gr[i, 0]
+                    NEXT i
+                    Acc(a, m)
+                CASE OP_SMOOTHL1
+                    ' aux holds clamp(d, -1, 1), the derivative of the Huber term (CLAMP here gives [] under -c)
+                    y = nd{"aux"}
+                    Acc(a, y * (gr[0, 0] / k))
+            ENDSWITCH
+        ENDIF
+    NEXT id
+ENDSUB
+
+' ─────────────────────────────────────────────────────────── parameters
+
+EXPORT FUNC PARAM(arr AS ARRAY) AS INTEGER
+    DIM pid = gPCount
+    DIM k$ = STR$(pid)
+    gPVal{k$} = arr
+    gPGrad{k$} = arr * 0
+    gPM{k$} = arr * 0
+    gPV{k$} = arr * 0
+    gPCount = gPCount + 1
+    RETURN pid
+ENDFUNC
+
+EXPORT FUNC PVAL(pid) AS ARRAY
+    RETURN gPVal{STR$(pid)}
+ENDFUNC
+
+EXPORT SUB PUT(pid, arr AS ARRAY)
+    gPVal{STR$(pid)} = arr
+ENDSUB
+
+EXPORT FUNC PGRAD(pid) AS ARRAY
+    RETURN gPGrad{STR$(pid)}
+ENDFUNC
+
+EXPORT SUB PUTGRAD(pid, arr AS ARRAY)
+    gPGrad{STR$(pid)} = arr
+ENDSUB
+
+EXPORT SUB ZERO_GRAD(pids AS ARRAY)
+    DIM i = 0
+    DIM k$ = ""
+    FOR i = 0 TO LEN(pids) - 1
+        k$ = STR$(pids[i])
+        gPGrad{k$} = gPGrad{k$} * 0
+    NEXT i
+ENDSUB
+
+' scales the gradients so their joint L2 norm is at most max_norm; returns the norm before (clip_grad_norm_)
+EXPORT FUNC CLIP_GRAD_NORM(pids AS ARRAY, max_norm) AS DOUBLE
+    DIM i = 0
+    DIM g = ZEROS([1, 1])
+    DIM tot = 0.0
+    FOR i = 0 TO LEN(pids) - 1
+        g = gPGrad{STR$(pids[i])}
+        tot = tot + SUM(g * g)
+    NEXT i
+    tot = SQR(tot)
+    DIM coef = max_norm / (tot + 0.000001)
+    IF coef < 1 THEN
+        FOR i = 0 TO LEN(pids) - 1
+            gPGrad{STR$(pids[i])} = gPGrad{STR$(pids[i])} * coef
+        NEXT i
+    ENDIF
+    RETURN tot
+ENDFUNC
+
+' ─────────────────────────────────────────────────────────── Adam (torch.optim.Adam defaults)
+
+EXPORT FUNC ADAM_NEW(pids AS ARRAY, lr, beta1 = 0.9, beta2 = 0.999, eps = 0.00000001) AS MAP
+    DIM opt = {}
+    opt{"pids"} = pids
+    opt{"lr"} = lr
+    opt{"b1"} = beta1
+    opt{"b2"} = beta2
+    opt{"eps"} = eps
+    opt{"t"} = 0
+    RETURN opt
+ENDFUNC
+
+EXPORT SUB ADAM_STEP(opt AS MAP)
+    DIM pids = opt{"pids"}
+    DIM b1 = opt{"b1"}
+    DIM b2 = opt{"b2"}
+    DIM eps = opt{"eps"}
+    opt{"t"} = opt{"t"} + 1
+    DIM t = opt{"t"}
+    DIM bc1 = 1 - b1 ^ t
+    DIM bc2 = 1 - b2 ^ t
+    DIM step_size = opt{"lr"} / bc1
+    DIM sbc2 = SQR(bc2)
+    DIM i = 0
+    DIM k$ = ""
+    DIM g = ZEROS([1, 1])
+    DIM m = ZEROS([1, 1])
+    DIM v = ZEROS([1, 1])
+    FOR i = 0 TO LEN(pids) - 1
+        k$ = STR$(pids[i])
+        g = gPGrad{k$}
+        m = gPM{k$} * b1 + g * (1 - b1)
+        v = gPV{k$} * b2 + g * g * (1 - b2)
+        gPM{k$} = m
+        gPV{k$} = v
+        gPVal{k$} = gPVal{k$} - (m / (SQR(v) / sbc2 + eps)) * step_size
+    NEXT i
+ENDSUB
+
+' ─────────────────────────────────────────────────────────── MLP (Linear + Tanh stack)
+
+' sizes = [inp, hidden..., out]; Linear layers with torch's default init U(-1/sqrt(fan_in), +1/sqrt(fan_in))
+EXPORT FUNC MLP_NEW(sizes AS ARRAY, gen) AS MAP
+    DIM net = {}
+    DIM nl = LEN(sizes) - 1
+    DIM pids = ZEROS_RC(1, 2 * nl)[0]
+    DIM i = 0
+    DIM bound = 0.0
+    FOR i = 0 TO nl - 1
+        bound = 1 / SQR(sizes[i])
+        pids[2 * i] = PARAM(RANDU(gen, sizes[i], sizes[i + 1], -bound, bound))
+        pids[2 * i + 1] = PARAM(RANDU(gen, 1, sizes[i + 1], -bound, bound))
+    NEXT i
+    net{"sizes"} = sizes
+    net{"nl"} = nl
+    net{"pids"} = pids
+    RETURN net
+ENDFUNC
+
+EXPORT FUNC MLP_PIDS(net AS MAP) AS ARRAY
+    RETURN net{"pids"}
+ENDFUNC
+
+' forward pass on the tape: x is a node (n x inp) -> node (n x out); tanh between layers, none after the last
+EXPORT FUNC MLP_FWD(net AS MAP, x) AS INTEGER
+    DIM pids = net{"pids"}
+    DIM h = x
+    DIM i = 0
+    FOR i = 0 TO net{"nl"} - 1
+        h = ADDROW(MM(h, P(pids[2 * i])), P(pids[2 * i + 1]))
+        IF i < net{"nl"} - 1 THEN h = TTANH(h)
+    NEXT i
+    RETURN h
+ENDFUNC
+
+' forward pass without a tape (acting, no gradient): X n x inp -> n x out
+EXPORT FUNC MLP_EVAL(net AS MAP, X AS ARRAY) AS ARRAY
+    DIM pids = net{"pids"}
+    DIM h = X
+    DIM i = 0
+    DIM nr = LEN(X)
+    FOR i = 0 TO net{"nl"} - 1
+        h = MATMUL(h, PVAL(pids[2 * i])) + REPROW(PVAL(pids[2 * i + 1]), nr)
+        IF i < net{"nl"} - 1 THEN h = TANH(h)
+    NEXT i
+    RETURN h
+ENDFUNC
+
+' activations per layer for ONE observation (a plain 1-D array), for the brain visualiser:
+' a map {"n": layers + 1, "0": obs, "1": first hidden layer, ..., "n-1": the output}
+EXPORT FUNC MLP_ACTS(net AS MAP, obs AS ARRAY) AS MAP
+    DIM k = LEN(obs)
+    DIM h = RESHAPE(obs, [1, k])
+    DIM acts = {}
+    acts{"0"} = obs
+    DIM pids = net{"pids"}
+    DIM i = 0
+    FOR i = 0 TO net{"nl"} - 1
+        h = MATMUL(h, PVAL(pids[2 * i])) + PVAL(pids[2 * i + 1])
+        IF i < net{"nl"} - 1 THEN h = TANH(h)
+        acts{STR$(i + 1)} = h[0]
+    NEXT i
+    acts{"n"} = net{"nl"} + 1
+    RETURN acts
+ENDFUNC
+
+' dst <- src for two lists of pids (load_state_dict)
+EXPORT SUB COPY_PARAMS(dst AS ARRAY, src AS ARRAY)
+    DIM i = 0
+    FOR i = 0 TO LEN(dst) - 1
+        PUT(dst[i], PVAL(src[i]) + 0)
+    NEXT i
+ENDSUB
+
+' dst <- (1 - tau) * dst + tau * src   (target networks)
+EXPORT SUB POLYAK(dst AS ARRAY, src AS ARRAY, tau)
+    DIM i = 0
+    FOR i = 0 TO LEN(dst) - 1
+        PUT(dst[i], PVAL(dst[i]) * (1 - tau) + PVAL(src[i]) * tau)
+    NEXT i
+ENDSUB
+
+' parameters as JSON {"0": [[...]], ...} in pid-list order, and back
+EXPORT FUNC SAVE_JSON$(pids AS ARRAY)
+    DIM m = {}
+    DIM i = 0
+    FOR i = 0 TO LEN(pids) - 1
+        m{STR$(i)} = PVAL(pids[i])
+    NEXT i
+    RETURN JSON.STRINGIFY$(m)
+ENDFUNC
+
+EXPORT SUB LOAD_JSON(pids AS ARRAY, text$)
+    DIM m = JSON.PARSE$(text$)
+    DIM i = 0
+    FOR i = 0 TO LEN(pids) - 1
+        PUT(pids[i], m{STR$(i)} + 0)
+    NEXT i
+ENDSUB

@@ -1,0 +1,14 @@
+IMPORT TRACK
+
+DIM names = ["easy", "hard"]
+DIM k AS INTEGER = 0
+DIM t0 = TICK()
+FOR k = 0 TO 1
+    DIM tr = TRACK.NEW(names[k])
+    DIM mask = tr{"mask"}
+    DIM idx = tr{"idx"}
+    PRINT names[k]; " n "; tr{"n"}; " ds "; FORMAT$("{:.6f}", tr{"ds"}); " length "; FORMAT$("{:.4f}", tr{"length"}); _
+        " road "; SUM(mask); " idxsum "; SUM(idx * mask); " h0 "; FORMAT$("{:.6f}", tr{"heading"}[0]); _
+        " c100 "; tr{"cx"}[100]; " "; tr{"cy"}[100]
+NEXT k
+PRINT "build ms "; TICK() - t0

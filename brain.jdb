@@ -1,0 +1,151 @@
+' brain.jdb - the per-car brains used by neuroevolution.
+'
+' Every car has its OWN small network 8 -> 12 -> 12 -> 2 (tanh everywhere), stored as one row of
+' 290 numbers called a "genome". The genomes of the whole swarm are one N x 290 matrix.
+'
+' Python runs all N networks at once with torch.baddbmm (a batched matrix multiply). jdBasic has no
+' 3-D matmul, so each layer is done with three plain 2-D MATMULs instead, still for all cars at once:
+'     X  (N x in)      --MATMUL E-->   every input repeated `out` times        (N x in*out)
+'     .* W (N x in*out)                every car's own weight on its own input
+'     --MATMUL S-->    sum over the inputs of each output                      (N x out)
+'     + b, tanh
+' E and S are fixed 0/1 matrices. The weights W, b are cut out of the genomes once per generation
+' (PREP), so a tick is 9 MATMULs and a few element-wise ops.
+'
+' Genome layout per layer, as in brain.py: in*out weights (index in*out_size + out), then out biases.
+
+EXPORT MODULE BRAIN
+IMPORT TORCH
+
+EXPORT CONST N_LAYERS = 3
+EXPORT CONST GENOME = 290          ' 8*12+12 + 12*12+12 + 12*2+2
+
+' layer sizes [8, 12, 12, 2]
+EXPORT FUNC SIZES() AS ARRAY
+    RETURN [8, 12, 12, 2]
+ENDFUNC
+
+EXPORT FUNC GENOME_SIZE() AS INTEGER
+    DIM s AS ARRAY = SIZES()
+    DIM total AS INTEGER = 0
+    DIM l AS INTEGER = 0
+    FOR l = 0 TO N_LAYERS - 1
+        total = total + s[l] * s[l + 1] + s[l + 1]
+    NEXT l
+    RETURN total
+ENDFUNC
+
+' Xavier-style random starting brains, N x 290: weights ~ N(0, sqrt(2 / (in + out))), biases 0
+EXPORT FUNC RANDOM_GENOMES(n, gen) AS ARRAY
+    DIM s AS ARRAY = SIZES()
+    DIM scale AS ARRAY = TORCH.ZEROS_RC(1, GENOME)
+    DIM p AS INTEGER = 0
+    DIM l AS INTEGER = 0
+    DIM j AS INTEGER = 0
+    DIM sd AS DOUBLE = 0.0
+    FOR l = 0 TO N_LAYERS - 1
+        sd = SQR(2.0 / (s[l] + s[l + 1]))
+        FOR j = 0 TO s[l] * s[l + 1] - 1
+            scale[0, p + j] = sd
+        NEXT j
+        p = p + s[l] * s[l + 1] + s[l + 1]
+    NEXT l
+    DIM g AS ARRAY = TORCH.RANDN(gen, n, GENOME) * TORCH.REPROW(scale, n)
+    RETURN g
+ENDFUNC
+
+' a GENOME x k matrix that picks k consecutive genome columns starting at p
+FUNC Pick(p AS INTEGER, k AS INTEGER) AS ARRAY
+    DIM m AS ARRAY = TORCH.ZEROS_RC(GENOME, k)
+    DIM j AS INTEGER = 0
+    FOR j = 0 TO k - 1
+        m[p + j, j] = 1
+    NEXT j
+    RETURN m
+ENDFUNC
+
+' E: in x (in*out), repeats input i into columns i*out .. i*out+out-1
+FUNC Expand(ni AS INTEGER, no AS INTEGER) AS ARRAY
+    DIM m AS ARRAY = TORCH.ZEROS_RC(ni, ni * no)
+    DIM i AS INTEGER = 0
+    DIM o AS INTEGER = 0
+    FOR i = 0 TO ni - 1
+        FOR o = 0 TO no - 1
+            m[i, i * no + o] = 1
+        NEXT o
+    NEXT i
+    RETURN m
+ENDFUNC
+
+' S: (in*out) x out, adds column i*out+o into output o
+FUNC Collect(ni AS INTEGER, no AS INTEGER) AS ARRAY
+    DIM m AS ARRAY = TORCH.ZEROS_RC(ni * no, no)
+    DIM i AS INTEGER = 0
+    DIM o AS INTEGER = 0
+    FOR i = 0 TO ni - 1
+        FOR o = 0 TO no - 1
+            m[i * no + o, o] = 1
+        NEXT o
+    NEXT i
+    RETURN m
+ENDFUNC
+
+' cut every car's weights out of the genomes: {"W0", "b0", "E0", "S0", ...} for FORWARD
+EXPORT FUNC PREP(genomes AS ARRAY) AS MAP
+    DIM s AS ARRAY = SIZES()
+    DIM br = {}
+    DIM p AS INTEGER = 0
+    DIM l AS INTEGER = 0
+    DIM ni AS INTEGER = 0
+    DIM no AS INTEGER = 0
+    DIM k$ = ""
+    FOR l = 0 TO N_LAYERS - 1
+        ni = s[l]
+        no = s[l + 1]
+        k$ = STR$(l)
+        br{"W" + k$} = MATMUL(genomes, Pick(p, ni * no))
+        p = p + ni * no
+        br{"b" + k$} = MATMUL(genomes, Pick(p, no))
+        p = p + no
+        br{"E" + k$} = Expand(ni, no)
+        br{"S" + k$} = Collect(ni, no)
+    NEXT l
+    RETURN br
+ENDFUNC
+
+' one layer for all cars: tanh(x_n . W_n + b_n) for every row n
+FUNC Layer(br AS MAP, l AS INTEGER, x AS ARRAY) AS ARRAY
+    DIM k$ = STR$(l)
+    DIM W AS ARRAY = br{"W" + k$}
+    DIM b AS ARRAY = br{"b" + k$}
+    DIM E AS ARRAY = br{"E" + k$}
+    DIM S AS ARRAY = br{"S" + k$}
+    DIM h AS ARRAY = TANH(MATMUL(MATMUL(x, E) * W, S) + b)
+    RETURN h
+ENDFUNC
+
+' run every car's own network on its own observation: obs N x 8 -> actions N x 2
+EXPORT FUNC FORWARD(br AS MAP, obs AS ARRAY) AS ARRAY
+    DIM x AS ARRAY = obs
+    DIM l AS INTEGER = 0
+    FOR l = 0 TO N_LAYERS - 1
+        x = Layer(br, l, x)
+    NEXT l
+    RETURN x
+ENDFUNC
+
+' activations of every layer for ONE car (one: its genome, a 1-D row of 290, obs: a 1-D row of 8), for the
+' brain visualiser: {"n": 4, "0": obs, "1": hidden 1, "2": hidden 2, "3": output}
+EXPORT FUNC ACTS(one AS ARRAY, obs AS ARRAY) AS MAP
+    DIM br AS MAP = PREP(RESHAPE(one, [1, GENOME]))
+    DIM x AS ARRAY = RESHAPE(obs, [1, LEN(obs)])
+    DIM acts = {}
+    acts{"0"} = obs
+    DIM l AS INTEGER = 0
+    FOR l = 0 TO N_LAYERS - 1
+        x = Layer(br, l, x)
+        acts{STR$(l + 1)} = x[0]
+    NEXT l
+    acts{"n"} = N_LAYERS + 1
+    RETURN acts
+ENDFUNC
