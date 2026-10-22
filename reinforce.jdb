@@ -1,0 +1,223 @@
+' reinforce.jdb - REINFORCE, the simplest policy-gradient algorithm.
+'
+' Idea: drive for a while, look at how much reward each action *eventually* led to (the "return").
+' Then make actions that led to above-average return more likely, and the others less likely.
+'     loss = - log(prob of action taken) * (return - average return)
+'
+' Two equivalent implementations of acting and of the gradient (checked against each other in
+' tests/reinforce_grad.jdb):
+'   * interpreter: vector code on the TORCH tape;
+'   * compiled (-c): scalar loops over preallocated arrays (RL_COMMON.LOOP_*), because a compiled
+'     program never frees an array temporary and the vector code would leak ~250 MB per iteration.
+
+EXPORT MODULE REINFORCE
+IMPORT ENV, TORCH, RL_COMMON
+
+CONST GAMMA = 0.97
+CONST LR = 0.003
+CONST TWO_PI = 6.283185307179586
+
+EXPORT FUNC NEW(e AS MAP, seed) AS MAP
+    DIM t = RL_COMMON.INIT(e, seed, "reinforce", "REINFORCE")
+    DIM gen AS INTEGER = t{"rng"}
+    DIM n AS INTEGER = e{"n"}
+    DIM net AS MAP = TORCH.MLP_NEW([ENV.OBS_DIM, 32, 32, ENV.ACT_DIM], gen)   ' outputs the *mean* action
+    t{"model"} = net
+    ' how adventurous the random exploration is
+    DIM ls AS INTEGER = TORCH.PARAM(TORCH.ZEROS_RC(1, ENV.ACT_DIM) - 0.7)
+    t{"log_std"} = ls
+    DIM mp AS ARRAY = TORCH.MLP_PIDS(net)
+    DIM ap AS ARRAY = ZEROS([LEN(mp) + 1])
+    DIM i AS INTEGER = 0
+    FOR i = 0 TO LEN(mp) - 1
+        ap[i] = mp[i]
+    NEXT i
+    ap[LEN(mp)] = ls
+    t{"all_pids"} = ap
+    t{"opt"} = TORCH.ADAM_NEW(ap, LR)
+    DIM rows AS INTEGER = RL_COMMON.ROLLOUT_STEPS * n
+    t{"buf"} = RL_COMMON.BUF_NEW(RL_COMMON.ROLLOUT_STEPS, n, ENV.OBS_DIM, ENV.ACT_DIM)
+    t{"act"} = TORCH.ZEROS_RC(n, ENV.ACT_DIM)                    ' this tick's actions (reused)
+    t{"obsf"} = ZEROS([n * ENV.OBS_DIM])
+    t{"loops"} = RL_COMMON.LOOPS()
+    t{"sc_act"} = RL_COMMON.LOOP_NEW(net, 1)
+    t{"sc_upd"} = RL_COMMON.LOOP_NEW(net, 1)
+    IF t{"loops"} = 1 THEN
+        t{"sc_act"} = RL_COMMON.LOOP_NEW(net, n)
+        t{"sc_upd"} = RL_COMMON.LOOP_NEW(net, rows)
+    ENDIF
+    RETURN t
+ENDFUNC
+
+' act = tanh(net(obs)) + randn * exp(log_std)
+FUNC SelectActions(t AS MAP, obs AS ARRAY) AS ARRAY
+    DIM net AS MAP = t{"model"}
+    DIM gen AS INTEGER = t{"rng"}
+    DIM n AS INTEGER = t{"n"}
+    DIM ls AS INTEGER = t{"log_std"}
+    DIM act AS ARRAY = t{"act"}
+    DIM lsv AS ARRAY = TORCH.PVAL(ls)
+    IF t{"loops"} = 1 THEN
+        DIM sc AS MAP = t{"sc_act"}
+        DIM obsf AS ARRAY = t{"obsf"}
+        DIM q AS INTEGER = 0
+        DIM kk AS INTEGER = 0
+        FOR q = 0 TO n - 1
+            FOR kk = 0 TO ENV.OBS_DIM - 1
+                obsf[q * ENV.OBS_DIM + kk] = obs[q, kk]
+            NEXT kk
+        NEXT q
+        RL_COMMON.LOOP_FWD(net, sc, obsf, n)
+        DIM raw AS ARRAY = sc{"a2"}
+        DIM i AS INTEGER = 0
+        DIM u1 AS DOUBLE = 0.0
+        DIM u2 AS DOUBLE = 0.0
+        DIM z AS DOUBLE = 0.0
+        DIM sd0 AS DOUBLE = EXP(lsv[0, 0])
+        DIM sd1 AS DOUBLE = EXP(lsv[0, 1])
+        FOR i = 0 TO n - 1
+            u1 = 1.0 - RNG.NEXT(gen)
+            u2 = RNG.NEXT(gen)
+            z = SQR(LOG(u1) * -2.0) * COS(u2 * TWO_PI)
+            act[i, 0] = TANH(raw[i * 2]) + z * sd0
+            u1 = 1.0 - RNG.NEXT(gen)
+            u2 = RNG.NEXT(gen)
+            z = SQR(LOG(u1) * -2.0) * COS(u2 * TWO_PI)
+            act[i, 1] = TANH(raw[i * 2 + 1]) + z * sd1
+        NEXT i
+        RETURN act
+    ENDIF
+    DIM mean AS ARRAY = TANH(TORCH.MLP_EVAL(net, obs))
+    DIM sd AS ARRAY = EXP(lsv)
+    DIM noise AS ARRAY = TORCH.RANDN(gen, n, ENV.ACT_DIM)
+    DIM a2 AS ARRAY = mean + noise * TORCH.REPROW(sd, n)
+    RETURN a2
+ENDFUNC
+
+' one env tick; returns 1 when an iteration (rollout + update) just finished
+EXPORT FUNC ADVANCE(t AS MAP) AS INTEGER
+    DIM e AS MAP = t{"env"}
+    DIM buf AS MAP = t{"buf"}
+    DIM obs AS ARRAY = t{"obs"}
+    DIM act AS ARRAY = SelectActions(t, obs)
+    RL_COMMON.BUF_PUSH_SA(buf, obs, act)
+    t{"obs"} = ENV.TICK(e, act)
+    DIM rew AS ARRAY = e{"reward"}
+    DIM done AS ARRAY = e{"done"}
+    RL_COMMON.BUF_PUSH_RD(buf, rew, done)
+    t{"ticks"} = t{"ticks"} + 1
+    IF t{"ticks"} >= RL_COMMON.ROLLOUT_STEPS THEN
+        Update(t)
+        t{"ticks"} = 0
+        buf{"t"} = 0
+        RL_COMMON.FINISH_ITERATION(t)
+        RETURN 1
+    ENDIF
+    RETURN 0
+ENDFUNC
+
+' gradients of the REINFORCE loss over the buffer, tape version -> PGRAD; returns the loss
+EXPORT FUNC GradsTape(t AS MAP) AS DOUBLE
+    DIM net AS MAP = t{"model"}
+    DIM buf AS MAP = t{"buf"}
+    DIM ap AS ARRAY = t{"all_pids"}
+    DIM ls AS INTEGER = t{"log_std"}
+    DIM ret AS ARRAY = buf{"ret"}
+    DIM adv AS ARRAY = RL_COMMON.NORMALIZE_COL(ret)         ' "better or worse than average?"
+    DIM bo AS ARRAY = RL_COMMON.BUF_OBS(buf)
+    DIM ba AS ARRAY = RL_COMMON.BUF_ACT(buf)
+    TORCH.RESET()
+    DIM mean AS INTEGER = TORCH.TTANH(TORCH.MLP_FWD(net, TORCH.C(bo)))
+    DIM logp AS INTEGER = TORCH.NORMAL_LOGP(TORCH.C(ba), mean, TORCH.P(ls))
+    DIM loss AS INTEGER = TORCH.SCALE(TORCH.TMEAN(TORCH.MUL(logp, TORCH.C(adv))), -1)
+    TORCH.ZERO_GRAD(ap)
+    TORCH.BACKWARD(loss)
+    DIM lv AS DOUBLE = TORCH.ITEM(loss)
+    TORCH.RESET()
+    RETURN lv
+ENDFUNC
+
+' the same gradients with scalar loops (no array temporaries); returns the loss
+EXPORT FUNC GradsLoop(t AS MAP) AS DOUBLE
+    DIM net AS MAP = t{"model"}
+    DIM buf AS MAP = t{"buf"}
+    DIM sc AS MAP = t{"sc_upd"}
+    DIM ls AS INTEGER = t{"log_std"}
+    DIM ret AS ARRAY = buf{"ret"}
+    DIM bo AS ARRAY = buf{"obs"}
+    DIM ba AS ARRAY = buf{"act"}
+    DIM m AS INTEGER = LEN(ret)
+    DIM mu AS DOUBLE = MEAN(ret)
+    DIM sdr AS DOUBLE = STDEV(ret)                          ' unbiased, like torch .std()
+    RL_COMMON.LOOP_FWD(net, sc, bo, m)
+    DIM raw AS ARRAY = sc{"a2"}
+    DIM dz AS ARRAY = sc{"d2"}
+    DIM lsv AS ARRAY = TORCH.PVAL(ls)
+    DIM glog AS ARRAY = TORCH.ZEROS_RC(1, ENV.ACT_DIM)
+    DIM s0 AS DOUBLE = EXP(lsv[0, 0])
+    DIM s1 AS DOUBLE = EXP(lsv[0, 1])
+    DIM r AS INTEGER = 0
+    DIM adv AS DOUBLE = 0.0
+    DIM c AS DOUBLE = 0.0
+    DIM mean0 AS DOUBLE = 0.0
+    DIM mean1 AS DOUBLE = 0.0
+    DIM z0 AS DOUBLE = 0.0
+    DIM z1 AS DOUBLE = 0.0
+    DIM g0 AS DOUBLE = 0.0
+    DIM g1 AS DOUBLE = 0.0
+    DIM loss AS DOUBLE = 0.0
+    DIM hl AS DOUBLE = 2 * 0.9189385332046727
+    FOR r = 0 TO m - 1
+        adv = (ret[r] - mu) / (sdr + 0.000001)
+        c = adv / m
+        mean0 = TANH(raw[r * 2])
+        mean1 = TANH(raw[r * 2 + 1])
+        z0 = (ba[r * 2] - mean0) / s0
+        z1 = (ba[r * 2 + 1] - mean1) / s1
+        ' loss = -mean(logp * adv), logp = sum_k (-z_k^2 / 2 - log_std_k) - 2 * 0.5 * log(2 pi)
+        loss = loss - c * (-0.5 * (z0 * z0 + z1 * z1) - lsv[0, 0] - lsv[0, 1] - hl)
+        dz[r * 2] = (-c * z0 / s0) * (1 - mean0 * mean0)
+        dz[r * 2 + 1] = (-c * z1 / s1) * (1 - mean1 * mean1)
+        g0 = g0 - c * (z0 * z0 - 1)
+        g1 = g1 - c * (z1 * z1 - 1)
+    NEXT r
+    glog[0, 0] = g0
+    glog[0, 1] = g1
+    RL_COMMON.LOOP_BWD(net, sc, bo, m)
+    TORCH.PUTGRAD(ls, glog)
+    RETURN loss
+ENDFUNC
+
+SUB Update(t AS MAP)
+    DIM net AS MAP = t{"model"}
+    DIM buf AS MAP = t{"buf"}
+    DIM opt AS MAP = t{"opt"}
+    RL_COMMON.RETURNS(buf, GAMMA)
+    DIM loss AS DOUBLE = 0.0
+    IF t{"loops"} = 1 THEN
+        loss = GradsLoop(t)
+    ELSE
+        loss = GradsTape(t)
+    ENDIF
+    t{"loss"} = loss
+    DIM nrm AS DOUBLE = TORCH.CLIP_GRAD_NORM(TORCH.MLP_PIDS(net), 1.0)
+    TORCH.ADAM_STEP(opt)
+ENDSUB
+
+EXPORT FUNC LEADER(t AS MAP) AS INTEGER
+    RETURN RL_COMMON.LEADER(t)
+ENDFUNC
+
+EXPORT FUNC ACTS(t AS MAP, i AS INTEGER) AS MAP
+    RETURN RL_COMMON.ACTS(t, i)
+ENDFUNC
+
+EXPORT FUNC SAVE_JSON$(t AS MAP)
+    DIM ap AS ARRAY = t{"all_pids"}
+    RETURN TORCH.SAVE_JSON$(ap)
+ENDFUNC
+
+EXPORT SUB LOAD_JSON(t AS MAP, text$)
+    DIM ap AS ARRAY = t{"all_pids"}
+    TORCH.LOAD_JSON(ap, text$)
+ENDSUB

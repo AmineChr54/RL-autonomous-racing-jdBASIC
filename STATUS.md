@@ -51,8 +51,16 @@ All probed libs compile and run under `-c` when handles are typed (`DIM lg AS MA
 `tools/jd.sh native tests/evo_smoke.jdb 20`: about 5.2 s/generation (200 cars, 900 ticks), peak 63 MB, flat. Best car passes a full lap (3186 px)
 by gen 14-20, mean 683 at gen 20. Interpreted: about 70 s/generation, 2 generations suffice as a check.
 
+## RL (rl_common.jdb, reinforce.jdb)
+`tools/jd.sh native tests/reinforce_smoke.jdb 60`: about 5.9 s/iteration (200 cars, 128 ticks + update), peak 77 MB, flat (58 MB after 3 iterations).
+Mean distance passes half a lap (1593 px) at iteration 38; iteration 60: best 5571 px (1.75 laps), mean 4088 px. Interpreted: about 14.5 s/iteration, peak 460 MB.
+Because of bug 9 the compiled path does not use the TORCH tape: acting and the REINFORCE gradient run as scalar loops over flat preallocated
+arrays (`RL_COMMON.LOOP_NEW/LOOP_FWD/LOOP_BWD`); the interpreter uses the tape. `tests/reinforce_grad.jdb` checks both give the same loss and
+gradients (max diff 7e-17, both backends). The vector `MATMUL` is also slow under -c (about 40 MFlop/s; `hTh` of 25600x32 takes 1.8 s).
+The tape update alone leaks about 250 MB per iteration natively (1 GB cap after 3 iterations).
+
 ## Work tracking
 Everything open is a GitHub issue: https://github.com/AmineChr54/RL-autonomous-racing-jdBASIC/issues
-(#19 local CI, #21 REINFORCE, #22 DQN, #23 PPO, #24 trainer + headless main,
+(#19 local CI, #22 DQN, #23 PPO, #24 trainer + headless main,
 #25 GUI, #26 plot_curves, #27 bench, #28 PyTorch cross-check, #29 COMPARISON.md).
 Done work and the jdBasic bugs above are closed issues #1-#18.

@@ -1,0 +1,380 @@
+' rl_common.jdb - shared plumbing for the gradient-based algorithms (REINFORCE, DQN, PPO).
+'
+' Unlike evolution, ALL cars share ONE brain. Every car keeps driving; when it crashes it is put back
+' on the track (at a random spot) and keeps feeding experience to the same brain.
+' One "iteration" = ROLLOUT_STEPS ticks of the whole swarm, followed by a learning update.
+'
+' A trainer is a map like EVOLUTION's: mode, name, env, rng, generation, hist_best, hist_mean, obs, plus
+' "model" (the MLP shown in the brain visualiser) and "n". An algorithm module (REINFORCE, ...) offers
+'     NEW(e, seed) AS MAP    ADVANCE(t) AS INTEGER (1 = an iteration just finished)
+'     LEADER(t)   ACTS(t, i)   SAVE_JSON$(t)   LOAD_JSON(t, text$)
+' and uses the helpers below. Rollout buffer: row t * N + i holds car i at tick t (flat, so every 2-D
+' buffer comes from TORCH.ZEROS_RC and is filled with typed scalar loops).
+'
+' IMPORTANT: ENV.TICK overwrites e{"obs"} / e{"reward"} / e{"done"} in place, so copy the
+' pre-tick observation into the buffer (BUF_PUSH_SA) BEFORE ticking and reward/done (BUF_PUSH_RD) after.
+
+EXPORT MODULE RL_COMMON
+IMPORT ENV, TORCH
+
+EXPORT CONST ROLLOUT_STEPS = 128
+
+' RLTrainer.__init__: shared fields, env flags, first observation
+EXPORT FUNC INIT(e AS MAP, seed, mode$, name$) AS MAP
+    DIM t = {}
+    t{"mode"} = mode$
+    t{"name"} = name$
+    t{"env"} = e
+    t{"n"} = e{"n"}
+    t{"rng"} = RNG.NEW(seed + 202)
+    e{"auto_reset"} = 1
+    e{"random_start"} = 1
+    t{"generation"} = 1                 ' = number of finished iterations + 1
+    t{"hist_best"} = []                 ' best and mean distance of the episodes finished in each iteration
+    t{"hist_mean"} = []
+    t{"ticks"} = 0                      ' ticks into the current rollout
+    t{"obs"} = ENV.RESET(e)
+    RETURN t
+ENDFUNC
+
+' ---------------------------------------------------------------- rollout buffer
+' obs / act are FLAT (row t * N + i starts at element (t * N + i) * dim): 1-D indexing is twice as fast as
+' 2-D under -c. BUF_OBS / BUF_ACT give the (T*N) x dim view for tape code.
+EXPORT FUNC BUF_NEW(steps, n, odim, adim) AS MAP
+    DIM b = {}
+    DIM m AS INTEGER = CINT(steps) * CINT(n)
+    b{"steps"} = steps
+    b{"n"} = n
+    b{"od"} = odim
+    b{"ad"} = adim
+    b{"obs"} = ZEROS([m * CINT(odim)])
+    b{"act"} = ZEROS([m * CINT(adim)])
+    b{"rew"} = ZEROS([m])
+    b{"done"} = ZEROS([m])
+    b{"ret"} = ZEROS([m])
+    b{"run"} = ZEROS([CINT(n)])
+    b{"t"} = 0
+    RETURN b
+ENDFUNC
+
+EXPORT FUNC BUF_OBS(b AS MAP) AS ARRAY
+    DIM bo AS ARRAY = b{"obs"}
+    RETURN RESHAPE(bo, [CINT(b{"steps"}) * CINT(b{"n"}), CINT(b{"od"})])
+ENDFUNC
+
+EXPORT FUNC BUF_ACT(b AS MAP) AS ARRAY
+    DIM ba AS ARRAY = b{"act"}
+    RETURN RESHAPE(ba, [CINT(b{"steps"}) * CINT(b{"n"}), CINT(b{"ad"})])
+ENDFUNC
+
+' obs, act of this tick (N x odim, N x adim) -> rows t * N ... t * N + N - 1
+EXPORT SUB BUF_PUSH_SA(b AS MAP, obs AS ARRAY, act AS ARRAY)
+    DIM bo AS ARRAY = b{"obs"}
+    DIM ba AS ARRAY = b{"act"}
+    DIM n AS INTEGER = b{"n"}
+    DIM od AS INTEGER = b{"od"}
+    DIM ad AS INTEGER = b{"ad"}
+    DIM base AS INTEGER = CINT(b{"t"}) * n
+    DIM i AS INTEGER = 0
+    DIM k AS INTEGER = 0
+    FOR i = 0 TO n - 1
+        FOR k = 0 TO od - 1
+            bo[(base + i) * od + k] = obs[i, k]
+        NEXT k
+        FOR k = 0 TO ad - 1
+            ba[(base + i) * ad + k] = act[i, k]
+        NEXT k
+    NEXT i
+ENDSUB
+
+' reward, done of this tick (1-D, N) and advance the buffer cursor
+EXPORT SUB BUF_PUSH_RD(b AS MAP, rew AS ARRAY, done AS ARRAY)
+    DIM br AS ARRAY = b{"rew"}
+    DIM bd AS ARRAY = b{"done"}
+    DIM n AS INTEGER = b{"n"}
+    DIM base AS INTEGER = CINT(b{"t"}) * n
+    DIM i AS INTEGER = 0
+    FOR i = 0 TO n - 1
+        br[base + i] = rew[i]
+        bd[base + i] = done[i]
+    NEXT i
+    b{"t"} = b{"t"} + 1
+ENDSUB
+
+' discounted returns into b{"ret"} (flat, T * N), backwards over T: run = rew + gamma * run * (1 - done)
+' (scalar loops over preallocated arrays: a compiled program never frees an array temporary)
+EXPORT SUB RETURNS(b AS MAP, gamma AS DOUBLE)
+    DIM br AS ARRAY = b{"rew"}
+    DIM bd AS ARRAY = b{"done"}
+    DIM ret AS ARRAY = b{"ret"}
+    DIM run AS ARRAY = b{"run"}
+    DIM n AS INTEGER = b{"n"}
+    DIM steps AS INTEGER = b{"steps"}
+    DIM t AS INTEGER = 0
+    DIM i AS INTEGER = 0
+    DIM r AS DOUBLE = 0.0
+    FOR i = 0 TO n - 1
+        run[i] = 0
+    NEXT i
+    FOR t = steps - 1 TO 0 STEP -1
+        FOR i = 0 TO n - 1
+            r = br[t * n + i] + gamma * run[i] * (1 - bd[t * n + i])
+            run[i] = r
+            ret[t * n + i] = r
+        NEXT i
+    NEXT t
+ENDSUB
+
+' (x - mean) / (std + 1e-6) with the unbiased std (torch .std()), as an M x 1 column
+EXPORT FUNC NORMALIZE_COL(x AS ARRAY) AS ARRAY
+    DIM m AS INTEGER = LEN(x)
+    DIM mu AS DOUBLE = MEAN(x)
+    DIM sd AS DOUBLE = STDEV(x)          ' builtin, unbiased like torch
+    RETURN RESHAPE((x - mu) / (sd + 0.000001), [m, 1])
+ENDFUNC
+
+' ---------------------------------------------------------------- iteration bookkeeping
+' _finish_iteration: best / mean of the episodes finished this iteration (else of best_progress now)
+EXPORT SUB FINISH_ITERATION(t AS MAP)
+    DIM e AS MAP = t{"env"}
+    DIM hb AS ARRAY = t{"hist_best"}
+    DIM hm AS ARRAY = t{"hist_mean"}
+    DIM cnt AS INTEGER = e{"fin_count"}
+    DIM p AS ARRAY = e{"best_progress"}
+    IF cnt > 0 THEN
+        PUSH(hb, e{"fin_max"})
+        PUSH(hm, e{"fin_sum"} / cnt)
+    ELSE
+        PUSH(hb, MAX(p))
+        PUSH(hm, SUM(p) / e{"n"})
+    ENDIF
+    t{"hist_best"} = hb
+    t{"hist_mean"} = hm
+    ENV.CLEAR_FINISHED(e)
+    t{"generation"} = t{"generation"} + 1
+ENDSUB
+
+EXPORT FUNC LEADER(t AS MAP) AS INTEGER
+    DIM e AS MAP = t{"env"}
+    DIM i AS INTEGER = ENV.LEADER(e)
+    IF i >= 0 THEN RETURN i
+    RETURN 0
+ENDFUNC
+
+' activations of car i for the brain visualiser
+EXPORT FUNC ACTS(t AS MAP, i AS INTEGER) AS MAP
+    DIM net AS MAP = t{"model"}
+    DIM obs AS ARRAY = t{"obs"}
+    RETURN TORCH.MLP_ACTS(net, obs[i])
+ENDFUNC
+
+' the headless trainer's log line: "REINFORCE      gen   1  best    xxxpx (0.xx laps)  mean    xxxpx  [  x.xs]"
+EXPORT FUNC HEADLINE$(t AS MAP, secs AS DOUBLE)
+    DIM e AS MAP = t{"env"}
+    DIM tr AS MAP = e{"track"}
+    DIM hb AS ARRAY = t{"hist_best"}
+    DIM hm AS ARRAY = t{"hist_mean"}
+    DIM k AS INTEGER = LEN(hb) - 1
+    DIM b AS DOUBLE = hb[k]
+    DIM m AS DOUBLE = hm[k]
+    DIM tl AS DOUBLE = tr{"length"}
+    DIM s1$ = RPAD$(t{"name"}, 14) + FORMAT$(" gen {:3d}  best {:7.0f}px ({:4.2f} laps)", LEN(hb), b, b / tl)
+    RETURN s1$ + FORMAT$("  mean {:7.0f}px  [{:5.1f}s]", m, secs)
+ENDFUNC
+
+' ---------------------------------------------------------------- allocation-free MLP kernels
+' A compiled (-c) program never frees an array temporary (every `a * b`, MATMUL, TANH ... leaks), so the
+' per-tick forward pass and the per-iteration backward pass of a 25600-row batch cannot be vector code
+' there (about 250 MB leaked per iteration). These kernels do the same maths in scalar loops over
+' preallocated FLAT scratch arrays (flat memory, ~2x faster than 2-D indexing) and are checked against the
+' TORCH tape in tests/reinforce_grad.jdb. Use them when LOOPS() = 1 (compiled); the interpreter frees
+' temporaries, so there the vector code is faster.
+EXPORT FUNC LOOPS() AS INTEGER
+    IF OS.FEATURE("NATIVEC") THEN RETURN 1
+    RETURN 0
+ENDFUNC
+
+' scratch for `rows` observations. Per layer l: a<l> = output (rows x out, flat), d<l> = dLoss/d(pre-activation),
+' w<l> / b<l> = the weights copied flat, gw<l> / gb<l> = gradients
+EXPORT FUNC LOOP_NEW(net AS MAP, rows) AS MAP
+    DIM sc = {}
+    DIM sizes AS ARRAY = net{"sizes"}
+    DIM nl AS INTEGER = net{"nl"}
+    DIM l AS INTEGER = 0
+    DIM ri AS INTEGER = CINT(rows)
+    DIM kin AS INTEGER = 0
+    DIM kout AS INTEGER = 0
+    FOR l = 0 TO nl - 1
+        kin = CINT(sizes[l])
+        kout = CINT(sizes[l + 1])
+        sc{"a" + STR$(l)} = ZEROS([ri * kout])
+        sc{"d" + STR$(l)} = ZEROS([ri * kout])
+        sc{"w" + STR$(l)} = ZEROS([kin * kout])
+        sc{"b" + STR$(l)} = ZEROS([kout])
+        sc{"gw" + STR$(l)} = ZEROS([kin * kout])
+        sc{"gb" + STR$(l)} = ZEROS([kout])
+    NEXT l
+    sc{"rows"} = rows
+    RETURN sc
+ENDFUNC
+
+' copy the current weights of layer l into the flat scratch w<l>, b<l>
+SUB LoadLayer(net AS MAP, sc AS MAP, l AS INTEGER)
+    DIM pids AS ARRAY = net{"pids"}
+    DIM W AS ARRAY = TORCH.PVAL(pids[2 * l])
+    DIM bb AS ARRAY = TORCH.PVAL(pids[2 * l + 1])
+    DIM wf AS ARRAY = sc{"w" + STR$(l)}
+    DIM bf AS ARRAY = sc{"b" + STR$(l)}
+    DIM kin AS INTEGER = LEN(W)
+    DIM kout AS INTEGER = LEN(W[0])
+    DIM k AS INTEGER = 0
+    DIM j AS INTEGER = 0
+    FOR k = 0 TO kin - 1
+        FOR j = 0 TO kout - 1
+            wf[k * kout + j] = W[k, j]
+        NEXT j
+    NEXT k
+    FOR j = 0 TO kout - 1
+        bf[j] = bb[0, j]
+    NEXT j
+ENDSUB
+
+SUB LayerFwd(src AS ARRAY, wf AS ARRAY, bf AS ARRAY, dst AS ARRAY, rows AS INTEGER, kin AS INTEGER, kout AS INTEGER, hidden AS INTEGER)
+    DIM r AS INTEGER = 0
+    DIM j AS INTEGER = 0
+    DIM k AS INTEGER = 0
+    DIM sb AS INTEGER = 0
+    DIM db AS INTEGER = 0
+    DIM s AS DOUBLE = 0.0
+    FOR r = 0 TO rows - 1
+        sb = r * kin
+        db = r * kout
+        FOR j = 0 TO kout - 1
+            s = bf[j]
+            FOR k = 0 TO kin - 1
+                s = s + src[sb + k] * wf[k * kout + j]
+            NEXT k
+            IF hidden = 1 THEN s = TANH(s)
+            dst[db + j] = s
+        NEXT j
+    NEXT r
+ENDSUB
+
+' forward pass of the first `rows` rows of X (flat rows x in); the raw output of the last layer is sc{"a<nl-1>"}
+EXPORT SUB LOOP_FWD(net AS MAP, sc AS MAP, X AS ARRAY, rows AS INTEGER)
+    DIM sizes AS ARRAY = net{"sizes"}
+    DIM nl AS INTEGER = net{"nl"}
+    DIM l AS INTEGER = 0
+    DIM hid AS INTEGER = 0
+    DIM src AS ARRAY = X
+    DIM dst AS ARRAY = sc{"a0"}
+    DIM wf AS ARRAY = sc{"w0"}
+    DIM bf AS ARRAY = sc{"b0"}
+    FOR l = 0 TO nl - 1
+        LoadLayer(net, sc, l)
+        IF l > 0 THEN src = sc{"a" + STR$(l - 1)}
+        dst = sc{"a" + STR$(l)}
+        wf = sc{"w" + STR$(l)}
+        bf = sc{"b" + STR$(l)}
+        hid = 0
+        IF l < nl - 1 THEN hid = 1
+        LayerFwd(src, wf, bf, dst, rows, CINT(sizes[l]), CINT(sizes[l + 1]), hid)
+    NEXT l
+ENDSUB
+
+' GW = srcT dZ, GB = column sums of dZ; dprev = (dZ WT) * (1 - aprev^2) when hasprev = 1
+SUB LayerBwd(src AS ARRAY, wf AS ARRAY, dZ AS ARRAY, GW AS ARRAY, GB AS ARRAY, dprev AS ARRAY, aprev AS ARRAY, rows AS INTEGER, kin AS INTEGER, kout AS INTEGER, hasprev AS INTEGER)
+    DIM r AS INTEGER = 0
+    DIM j AS INTEGER = 0
+    DIM k AS INTEGER = 0
+    DIM sb AS INTEGER = 0
+    DIM db AS INTEGER = 0
+    DIM s AS DOUBLE = 0.0
+    DIM g AS DOUBLE = 0.0
+    DIM x AS DOUBLE = 0.0
+    DIM a AS DOUBLE = 0.0
+    FOR k = 0 TO kin * kout - 1
+        GW[k] = 0
+    NEXT k
+    FOR j = 0 TO kout - 1
+        GB[j] = 0
+    NEXT j
+    FOR r = 0 TO rows - 1
+        sb = r * kin
+        db = r * kout
+        FOR k = 0 TO kin - 1
+            x = src[sb + k]
+            FOR j = 0 TO kout - 1
+                GW[k * kout + j] = GW[k * kout + j] + x * dZ[db + j]
+            NEXT j
+        NEXT k
+        FOR j = 0 TO kout - 1
+            GB[j] = GB[j] + dZ[db + j]
+        NEXT j
+        IF hasprev = 1 THEN
+            FOR k = 0 TO kin - 1
+                s = 0
+                FOR j = 0 TO kout - 1
+                    s = s + dZ[db + j] * wf[k * kout + j]
+                NEXT j
+                a = aprev[sb + k]
+                dprev[sb + k] = s * (1 - a * a)
+            NEXT k
+        ENDIF
+    NEXT r
+ENDSUB
+
+' backward pass: sc{"d<nl-1>"} must hold dLoss/d(raw output); fills the gradients of every layer into PGRAD
+' (TORCH.PUTGRAD) for the pids of net. X is the same flat array that went into LOOP_FWD.
+EXPORT SUB LOOP_BWD(net AS MAP, sc AS MAP, X AS ARRAY, rows AS INTEGER)
+    DIM pids AS ARRAY = net{"pids"}
+    DIM sizes AS ARRAY = net{"sizes"}
+    DIM nl AS INTEGER = net{"nl"}
+    DIM l AS INTEGER = 0
+    DIM kin AS INTEGER = 0
+    DIM kout AS INTEGER = 0
+    DIM i AS INTEGER = 0
+    DIM j AS INTEGER = 0
+    DIM wf AS ARRAY = sc{"w0"}
+    DIM dZ AS ARRAY = sc{"d0"}
+    DIM GW AS ARRAY = sc{"gw0"}
+    DIM GB AS ARRAY = sc{"gb0"}
+    DIM src AS ARRAY = X
+    DIM dprev AS ARRAY = X
+    DIM aprev AS ARRAY = X
+    DIM hp AS INTEGER = 0
+    DIM g2 AS ARRAY = TORCH.ZEROS_RC(1, 1)
+    DIM gb2 AS ARRAY = TORCH.ZEROS_RC(1, 1)
+    FOR l = nl - 1 TO 0 STEP -1
+        kin = CINT(sizes[l])
+        kout = CINT(sizes[l + 1])
+        src = X
+        dprev = X
+        aprev = X
+        hp = 0
+        IF l > 0 THEN
+            src = sc{"a" + STR$(l - 1)}
+            dprev = sc{"d" + STR$(l - 1)}
+            aprev = src
+            hp = 1
+        ENDIF
+        wf = sc{"w" + STR$(l)}
+        dZ = sc{"d" + STR$(l)}
+        GW = sc{"gw" + STR$(l)}
+        GB = sc{"gb" + STR$(l)}
+        LayerBwd(src, wf, dZ, GW, GB, dprev, aprev, rows, kin, kout, hp)
+        ' hand the gradients to TORCH as 2-D arrays (tiny)
+        g2 = TORCH.ZEROS_RC(kin, kout)
+        gb2 = TORCH.ZEROS_RC(1, kout)
+        FOR i = 0 TO kin - 1
+            FOR j = 0 TO kout - 1
+                g2[i, j] = GW[i * kout + j]
+            NEXT j
+        NEXT i
+        FOR j = 0 TO kout - 1
+            gb2[0, j] = GB[j]
+        NEXT j
+        TORCH.PUTGRAD(pids[2 * l], g2)
+        TORCH.PUTGRAD(pids[2 * l + 1], gb2)
+    NEXT l
+ENDSUB

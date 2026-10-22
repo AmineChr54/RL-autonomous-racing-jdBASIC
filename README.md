@@ -21,7 +21,8 @@ The port has three goals:
 | `torch.jdb` | (PyTorch) | Tape autograd with 20 ops, MLP, Adam, `clip_grad_norm`, polyak, JSON save/load | ✅ gradcheck passes interpreted and native |
 | `brain.jdb` | `brain.py` | 290-number genomes, every car runs its own net, batched without `bmm` | ✅ identical to `forward_numpy` (2e-16) |
 | `evolution.jdb` | `evolution.py` | Elites, crossover, mutation | 🚧 interpreter works, native in progress |
-| `rl_common.jdb`, `reinforce.jdb`, `dqn.jdb`, `ppo.jdb` | same names | The three gradient-based learners on `torch.jdb` | ⏳ |
+| `rl_common.jdb`, `reinforce.jdb` | `rl_common.py`, `reinforce.py` | Shared rollout plumbing, REINFORCE on `torch.jdb` (tape in the interpreter, leak-free scalar loops under `-c`) | ✅ learns: mean passes half a lap at iteration 38 |
+| `dqn.jdb`, `ppo.jdb` | same names | The other two gradient-based learners | ⏳ |
 | `main.jdb` | `main.py` | Window (GFX) and headless modes, same flags and keys | ⏳ |
 | `plot_curves.jdb`, `bench.jdb` | `plot_curves.py`, `accel.py` | Learning-curve chart (SVG), timings interpreted vs native | ⏳ |
 
