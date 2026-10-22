@@ -1,0 +1,19 @@
+' PPO smoke test: N iterations, 200 cars, hard track, 900 max steps, seed 0.
+'   tools/jd.sh run|native tests/ppo_smoke.jdb 3
+IMPORT TRACK, ENV, PPO, RL_COMMON
+DIM tr AS MAP = TRACK.NEW("hard")
+DIM e AS MAP = ENV.NEW(tr, 200, 900, 0)
+DIM t AS MAP = PPO.NEW(e, 0)
+DIM iters AS INTEGER = CINT(VAL(OS.ARGS()[1]))
+DIM t0 AS DOUBLE = TICK()
+WHILE t{"generation"} <= iters
+    IF PPO.ADVANCE(t) = 1 THEN
+        PRINT RL_COMMON.HEADLINE$(t, (TICK() - t0) / 1000)
+    ENDIF
+WEND
+PRINT "s/iteration: "; (TICK() - t0) / 1000 / iters
+DIM am AS MAP = PPO.ACTS(t, 0)
+PRINT "leader "; PPO.LEADER(t); "  layers "; am{"n"}
+DIM js$ = PPO.SAVE_JSON$(t)
+PPO.LOAD_JSON(t, js$)
+PRINT "json bytes "; LEN(js$)

@@ -1,0 +1,571 @@
+' ppo.jdb - PPO (Proximal Policy Optimization), the modern workhorse.
+'
+' Two networks: the actor (sensors -> mean steer / throttle, the "driver") and the critic (sensors -> expected
+' future reward, the "coach"). Advantage = "was this action better than the coach expected?" (GAE). PPO nudges
+' the driver toward good actions, but the *clip* stops one update from changing the driver too much.
+'     ratio   = exp(logp_new - logp_old)
+'     pi_loss = -mean(min(ratio * A, clamp(ratio, 1 - CLIP, 1 + CLIP) * A))
+'     loss    = pi_loss + 0.5 * mean((V(s) - return)^2)
+'
+' Like REINFORCE there are two equivalent implementations (checked in tests/ppo_grad.jdb):
+'   * interpreter: vector code on the TORCH tape (GradsTape) + TORCH Adam;
+'   * compiled (-c): scalar loops over preallocated flat arrays (GradsLoop + LoopStep), because a compiled
+'     program never frees an array temporary (STATUS bug 9) and 52 minibatch updates would leak.
+
+EXPORT MODULE PPO
+IMPORT ENV, TORCH, RL_COMMON
+
+CONST GAMMA = 0.97
+CONST GAELAM = 0.95
+CONST CLIPEPS = 0.2
+CONST LR = 0.001
+CONST EPOCHS = 4
+CONST MINIBATCH = 2048
+CONST MAXNORM = 0.5
+CONST TWO_PI = 6.283185307179586
+CONST HALF_LOG_2PI = 0.9189385332046727
+
+EXPORT FUNC NEW(e AS MAP, seed) AS MAP
+    DIM t = RL_COMMON.INIT(e, seed, "ppo", "PPO")
+    DIM gen AS INTEGER = t{"rng"}
+    DIM n AS INTEGER = e{"n"}
+    DIM od AS INTEGER = ENV.OBS_DIM
+    DIM rows AS INTEGER = RL_COMMON.ROLLOUT_STEPS * n
+    DIM net AS MAP = TORCH.MLP_NEW([od, 32, 32, ENV.ACT_DIM], gen)      ' actor: the *mean* action
+    DIM crit AS MAP = TORCH.MLP_NEW([od, 32, 32, 1], gen)               ' critic: the expected return
+    t{"model"} = net
+    t{"critic"} = crit
+    DIM ls AS INTEGER = TORCH.PARAM(TORCH.ZEROS_RC(1, ENV.ACT_DIM) - 0.7)
+    t{"log_std"} = ls
+    DIM mp AS ARRAY = TORCH.MLP_PIDS(net)
+    DIM cp AS ARRAY = TORCH.MLP_PIDS(crit)
+    DIM ap AS ARRAY = ZEROS([LEN(mp) + LEN(cp) + 1])
+    DIM i AS INTEGER = 0
+    FOR i = 0 TO LEN(mp) - 1
+        ap[i] = mp[i]
+    NEXT i
+    FOR i = 0 TO LEN(cp) - 1
+        ap[LEN(mp) + i] = cp[i]
+    NEXT i
+    ap[LEN(mp) + LEN(cp)] = ls
+    t{"all_pids"} = ap
+    t{"opt"} = TORCH.ADAM_NEW(ap, LR)
+    t{"buf"} = RL_COMMON.BUF_NEW(RL_COMMON.ROLLOUT_STEPS, n, od, ENV.ACT_DIM)
+    t{"act"} = TORCH.ZEROS_RC(n, ENV.ACT_DIM)                    ' this tick's actions (reused)
+    t{"obsf"} = ZEROS([n * od])
+    t{"logp"} = ZEROS([rows])                                    ' old log-prob and value of each sample
+    t{"val"} = ZEROS([rows])
+    t{"adv"} = ZEROS([rows])
+    t{"lastv"} = ZEROS([n])
+    t{"perm"} = ZEROS([rows])
+    t{"idx"} = ZEROS([MINIBATCH])
+    ' minibatch scratch (flat)
+    t{"xmb"} = ZEROS([MINIBATCH * od])
+    t{"amb"} = ZEROS([MINIBATCH * ENV.ACT_DIM])
+    t{"lpmb"} = ZEROS([MINIBATCH])
+    t{"advmb"} = ZEROS([MINIBATCH])
+    t{"retmb"} = ZEROS([MINIBATCH])
+    t{"glog"} = ZEROS([ENV.ACT_DIM])
+    t{"loops"} = RL_COMMON.LOOPS()
+    t{"sca"} = RL_COMMON.LOOP_NEW(net, MINIBATCH)                ' update scratch, actor / critic
+    t{"scc"} = RL_COMMON.LOOP_NEW(crit, MINIBATCH)
+    AdamInit(t, "sca", net)
+    AdamInit(t, "scc", crit)
+    t{"adam_t"} = 0
+    t{"mls"} = ZEROS([ENV.ACT_DIM])
+    t{"vls"} = ZEROS([ENV.ACT_DIM])
+    t{"sa_act"} = RL_COMMON.LOOP_NEW(net, 1)                     ' acting scratch
+    t{"sa_crit"} = RL_COMMON.LOOP_NEW(crit, 1)
+    IF t{"loops"} = 1 THEN
+        t{"sa_act"} = RL_COMMON.LOOP_NEW(net, n)
+        t{"sa_crit"} = RL_COMMON.LOOP_NEW(crit, n)
+    ENDIF
+    RETURN t
+ENDFUNC
+
+' flat Adam moments next to the gradients in the loop scratch: mw<l> / vw<l> / mb<l> / vb<l>
+SUB AdamInit(t AS MAP, key$, net AS MAP)
+    DIM sc AS MAP = t{key$}
+    DIM sizes AS ARRAY = net{"sizes"}
+    DIM nl AS INTEGER = net{"nl"}
+    DIM l AS INTEGER = 0
+    FOR l = 0 TO nl - 1
+        sc{"mw" + STR$(l)} = ZEROS([CINT(sizes[l]) * CINT(sizes[l + 1])])
+        sc{"vw" + STR$(l)} = ZEROS([CINT(sizes[l]) * CINT(sizes[l + 1])])
+        sc{"mb" + STR$(l)} = ZEROS([CINT(sizes[l + 1])])
+        sc{"vb" + STR$(l)} = ZEROS([CINT(sizes[l + 1])])
+    NEXT l
+ENDSUB
+
+' act = tanh(actor(obs)) + randn * exp(log_std); also stores logp and the critic value of this tick in the buffer
+FUNC SelectActions(t AS MAP, obs AS ARRAY) AS ARRAY
+    DIM net AS MAP = t{"model"}
+    DIM crit AS MAP = t{"critic"}
+    DIM gen AS INTEGER = t{"rng"}
+    DIM n AS INTEGER = t{"n"}
+    DIM ls AS INTEGER = t{"log_std"}
+    DIM act AS ARRAY = t{"act"}
+    DIM lp AS ARRAY = t{"logp"}
+    DIM vl AS ARRAY = t{"val"}
+    DIM lsv AS ARRAY = TORCH.PVAL(ls)
+    DIM base AS INTEGER = CINT(t{"ticks"}) * n
+    DIM i AS INTEGER = 0
+    IF t{"loops"} = 1 THEN
+        DIM sc AS MAP = t{"sa_act"}
+        DIM scv AS MAP = t{"sa_crit"}
+        DIM obsf AS ARRAY = t{"obsf"}
+        DIM q AS INTEGER = 0
+        DIM kk AS INTEGER = 0
+        FOR q = 0 TO n - 1
+            FOR kk = 0 TO ENV.OBS_DIM - 1
+                obsf[q * ENV.OBS_DIM + kk] = obs[q, kk]
+            NEXT kk
+        NEXT q
+        RL_COMMON.LOOP_FWD(net, sc, obsf, n)
+        RL_COMMON.LOOP_FWD(crit, scv, obsf, n)
+        DIM raw AS ARRAY = sc{"a2"}
+        DIM cv AS ARRAY = scv{"a2"}
+        DIM u1 AS DOUBLE = 0.0
+        DIM u2 AS DOUBLE = 0.0
+        DIM z0 AS DOUBLE = 0.0
+        DIM z1 AS DOUBLE = 0.0
+        DIM sd0 AS DOUBLE = EXP(lsv[0, 0])
+        DIM sd1 AS DOUBLE = EXP(lsv[0, 1])
+        FOR i = 0 TO n - 1
+            u1 = 1.0 - RNG.NEXT(gen)
+            u2 = RNG.NEXT(gen)
+            z0 = SQR(LOG(u1) * -2.0) * COS(u2 * TWO_PI)
+            u1 = 1.0 - RNG.NEXT(gen)
+            u2 = RNG.NEXT(gen)
+            z1 = SQR(LOG(u1) * -2.0) * COS(u2 * TWO_PI)
+            act[i, 0] = TANH(raw[i * 2]) + z0 * sd0
+            act[i, 1] = TANH(raw[i * 2 + 1]) + z1 * sd1
+            lp[base + i] = -0.5 * (z0 * z0 + z1 * z1) - lsv[0, 0] - lsv[0, 1] - 2 * HALF_LOG_2PI
+            vl[base + i] = cv[i]
+        NEXT i
+        RETURN act
+    ENDIF
+    DIM mean AS ARRAY = TANH(TORCH.MLP_EVAL(net, obs))
+    DIM sd AS ARRAY = EXP(lsv)
+    DIM noise AS ARRAY = TORCH.RANDN(gen, n, ENV.ACT_DIM)
+    DIM a2 AS ARRAY = mean + noise * TORCH.REPROW(sd, n)
+    DIM el AS ARRAY = noise * noise * -0.5 - TORCH.REPROW(lsv, n)
+    DIM lg AS ARRAY = TORCH.SUMCOLS(el) - 2 * HALF_LOG_2PI
+    DIM cvv AS ARRAY = TORCH.MLP_EVAL(crit, obs)
+    FOR i = 0 TO n - 1
+        lp[base + i] = lg[i, 0]
+        vl[base + i] = cvv[i, 0]
+    NEXT i
+    RETURN a2
+ENDFUNC
+
+' one env tick; returns 1 when an iteration (rollout + update) just finished
+EXPORT FUNC ADVANCE(t AS MAP) AS INTEGER
+    DIM e AS MAP = t{"env"}
+    DIM buf AS MAP = t{"buf"}
+    DIM obs AS ARRAY = t{"obs"}
+    DIM act AS ARRAY = SelectActions(t, obs)
+    RL_COMMON.BUF_PUSH_SA(buf, obs, act)
+    t{"obs"} = ENV.TICK(e, act)
+    DIM rew AS ARRAY = e{"reward"}
+    DIM done AS ARRAY = e{"done"}
+    RL_COMMON.BUF_PUSH_RD(buf, rew, done)
+    t{"ticks"} = t{"ticks"} + 1
+    IF t{"ticks"} >= RL_COMMON.ROLLOUT_STEPS THEN
+        Update(t)
+        t{"ticks"} = 0
+        buf{"t"} = 0
+        RL_COMMON.FINISH_ITERATION(t)
+        RETURN 1
+    ENDIF
+    RETURN 0
+ENDFUNC
+
+' ---------------------------------------------------------------- advantages
+' GAE into t{"adv"} and ret = adv + val into buf{"ret"}, then adv normalised (mean 0, unbiased std, + 1e-6)
+EXPORT SUB Advantages(t AS MAP, lastv AS ARRAY)
+    DIM buf AS MAP = t{"buf"}
+    DIM rew AS ARRAY = buf{"rew"}
+    DIM done AS ARRAY = buf{"done"}
+    DIM ret AS ARRAY = buf{"ret"}
+    DIM gae AS ARRAY = buf{"run"}
+    DIM val AS ARRAY = t{"val"}
+    DIM adv AS ARRAY = t{"adv"}
+    DIM n AS INTEGER = t{"n"}
+    DIM steps AS INTEGER = buf{"steps"}
+    DIM tt AS INTEGER = 0
+    DIM i AS INTEGER = 0
+    DIM k AS INTEGER = 0
+    DIM nv AS DOUBLE = 0.0
+    DIM nonterm AS DOUBLE = 0.0
+    DIM delta AS DOUBLE = 0.0
+    DIM g AS DOUBLE = 0.0
+    FOR i = 0 TO n - 1
+        gae[i] = 0
+    NEXT i
+    FOR tt = steps - 1 TO 0 STEP -1
+        FOR i = 0 TO n - 1
+            k = tt * n + i
+            IF tt = steps - 1 THEN
+                nv = lastv[i]
+            ELSE
+                nv = val[k + n]
+            ENDIF
+            nonterm = 1 - done[k]
+            delta = rew[k] + GAMMA * nv * nonterm - val[k]
+            g = delta + GAMMA * GAELAM * nonterm * gae[i]
+            gae[i] = g
+            adv[k] = g
+            ret[k] = g + val[k]
+        NEXT i
+    NEXT tt
+    DIM m AS INTEGER = steps * n
+    DIM mu AS DOUBLE = 0.0
+    DIM ss AS DOUBLE = 0.0
+    FOR k = 0 TO m - 1
+        mu = mu + adv[k]
+    NEXT k
+    mu = mu / m
+    FOR k = 0 TO m - 1
+        ss = ss + (adv[k] - mu) * (adv[k] - mu)
+    NEXT k
+    ss = SQR(ss / (m - 1)) + 0.000001
+    FOR k = 0 TO m - 1
+        adv[k] = (adv[k] - mu) / ss
+    NEXT k
+ENDSUB
+
+' ---------------------------------------------------------------- the loss of one minibatch
+' The minibatch is perm[s .. s + m - 1] (indices into the T * N buffer). Both functions return
+' pi_loss + 0.5 * v_loss.
+
+' tape version: the gradients end up in PGRAD of every pid in all_pids
+EXPORT FUNC GradsTape(t AS MAP, perm AS ARRAY, s AS INTEGER, m AS INTEGER) AS DOUBLE
+    DIM net AS MAP = t{"model"}
+    DIM crit AS MAP = t{"critic"}
+    DIM buf AS MAP = t{"buf"}
+    DIM ap AS ARRAY = t{"all_pids"}
+    DIM ls AS INTEGER = t{"log_std"}
+    DIM idx AS ARRAY = ZEROS([m])
+    DIM i AS INTEGER = 0
+    FOR i = 0 TO m - 1
+        idx[i] = perm[s + i]
+    NEXT i
+    DIM bo AS ARRAY = RL_COMMON.BUF_OBS(buf)
+    DIM ba AS ARRAY = RL_COMMON.BUF_ACT(buf)
+    DIM olp AS ARRAY = t{"logp"}
+    DIM adv AS ARRAY = t{"adv"}
+    DIM ret AS ARRAY = buf{"ret"}
+    DIM xo AS ARRAY = bo[idx]
+    DIM xa AS ARRAY = ba[idx]
+    DIM colo AS ARRAY = RESHAPE(olp[idx], [m, 1])
+    DIM cola AS ARRAY = RESHAPE(adv[idx], [m, 1])
+    DIM colr AS ARRAY = RESHAPE(ret[idx], [m, 1])
+    TORCH.RESET()
+    DIM x AS INTEGER = TORCH.C(xo)
+    DIM mean AS INTEGER = TORCH.TTANH(TORCH.MLP_FWD(net, x))
+    DIM logp AS INTEGER = TORCH.NORMAL_LOGP(TORCH.C(xa), mean, TORCH.P(ls))
+    DIM ratio AS INTEGER = TORCH.TEXP(TORCH.MINUS(logp, TORCH.C(colo)))
+    DIM s1 AS INTEGER = TORCH.MUL(ratio, TORCH.C(cola))
+    DIM s2 AS INTEGER = TORCH.MUL(TORCH.TCLAMP(ratio, 1 - CLIPEPS, 1 + CLIPEPS), TORCH.C(cola))
+    DIM piloss AS INTEGER = TORCH.SCALE(TORCH.TMEAN(TORCH.MINIMUM(s1, s2)), -1)
+    DIM v AS INTEGER = TORCH.MLP_FWD(crit, x)
+    DIM vloss AS INTEGER = TORCH.TMEAN(TORCH.SQUARE(TORCH.MINUS(v, TORCH.C(colr))))
+    DIM loss AS INTEGER = TORCH.ADD(piloss, TORCH.SCALE(vloss, 0.5))
+    TORCH.ZERO_GRAD(ap)
+    TORCH.BACKWARD(loss)
+    DIM lv AS DOUBLE = TORCH.ITEM(loss)
+    TORCH.RESET()
+    RETURN lv
+ENDFUNC
+
+' scalar-loop version: gradients stay flat in t{"sca"} / t{"scc"} (gw<l>, gb<l>) and t{"glog"}
+EXPORT FUNC GradsLoop(t AS MAP, perm AS ARRAY, s AS INTEGER, m AS INTEGER) AS DOUBLE
+    DIM net AS MAP = t{"model"}
+    DIM crit AS MAP = t{"critic"}
+    DIM buf AS MAP = t{"buf"}
+    DIM sca AS MAP = t{"sca"}
+    DIM scc AS MAP = t{"scc"}
+    DIM ls AS INTEGER = t{"log_std"}
+    DIM bo AS ARRAY = buf{"obs"}
+    DIM ba AS ARRAY = buf{"act"}
+    DIM ret AS ARRAY = buf{"ret"}
+    DIM olp AS ARRAY = t{"logp"}
+    DIM adv AS ARRAY = t{"adv"}
+    DIM xmb AS ARRAY = t{"xmb"}
+    DIM amb AS ARRAY = t{"amb"}
+    DIM lpmb AS ARRAY = t{"lpmb"}
+    DIM advmb AS ARRAY = t{"advmb"}
+    DIM retmb AS ARRAY = t{"retmb"}
+    DIM od AS INTEGER = ENV.OBS_DIM
+    DIM r AS INTEGER = 0
+    DIM k AS INTEGER = 0
+    DIM p AS INTEGER = 0
+    FOR r = 0 TO m - 1
+        p = CINT(perm[s + r])
+        FOR k = 0 TO od - 1
+            xmb[r * od + k] = bo[p * od + k]
+        NEXT k
+        amb[r * 2] = ba[p * 2]
+        amb[r * 2 + 1] = ba[p * 2 + 1]
+        lpmb[r] = olp[p]
+        advmb[r] = adv[p]
+        retmb[r] = ret[p]
+    NEXT r
+    RL_COMMON.LOOP_FWD(net, sca, xmb, m)
+    RL_COMMON.LOOP_FWD(crit, scc, xmb, m)
+    DIM raw AS ARRAY = sca{"a2"}
+    DIM dz AS ARRAY = sca{"d2"}
+    DIM cv AS ARRAY = scc{"a2"}
+    DIM dv AS ARRAY = scc{"d2"}
+    DIM glog AS ARRAY = t{"glog"}
+    DIM lsv AS ARRAY = TORCH.PVAL(ls)
+    DIM s0 AS DOUBLE = EXP(lsv[0, 0])
+    DIM s1 AS DOUBLE = EXP(lsv[0, 1])
+    DIM lo AS DOUBLE = 1 - CLIPEPS
+    DIM hi AS DOUBLE = 1 + CLIPEPS
+    DIM mean0 AS DOUBLE = 0.0
+    DIM mean1 AS DOUBLE = 0.0
+    DIM z0 AS DOUBLE = 0.0
+    DIM z1 AS DOUBLE = 0.0
+    DIM logp AS DOUBLE = 0.0
+    DIM ratio AS DOUBLE = 0.0
+    DIM rc AS DOUBLE = 0.0
+    DIM cg AS DOUBLE = 0.0
+    DIM a AS DOUBLE = 0.0
+    DIM q1 AS DOUBLE = 0.0
+    DIM q2 AS DOUBLE = 0.0
+    DIM dmin AS DOUBLE = 0.0
+    DIM g AS DOUBLE = 0.0
+    DIM diff AS DOUBLE = 0.0
+    DIM pl AS DOUBLE = 0.0
+    DIM vl AS DOUBLE = 0.0
+    DIM g0 AS DOUBLE = 0.0
+    DIM g1 AS DOUBLE = 0.0
+    FOR r = 0 TO m - 1
+        mean0 = TANH(raw[r * 2])
+        mean1 = TANH(raw[r * 2 + 1])
+        z0 = (amb[r * 2] - mean0) / s0
+        z1 = (amb[r * 2 + 1] - mean1) / s1
+        logp = -0.5 * (z0 * z0 + z1 * z1) - lsv[0, 0] - lsv[0, 1] - 2 * HALF_LOG_2PI
+        ratio = EXP(logp - lpmb[r])
+        rc = ratio
+        cg = 1
+        IF rc < lo THEN
+            rc = lo
+            cg = 0
+        ENDIF
+        IF rc > hi THEN
+            rc = hi
+            cg = 0
+        ENDIF
+        a = advmb[r]
+        q1 = ratio * a
+        q2 = rc * a
+        ' torch.min: d/d(ratio) = A where s1 < s2, cg * A where s1 > s2, half of each on a tie
+        IF q1 < q2 THEN
+            dmin = a
+            pl = pl + q1
+        ELSE
+            IF q1 > q2 THEN
+                dmin = cg * a
+            ELSE
+                dmin = 0.5 * (a + cg * a)
+            ENDIF
+            pl = pl + q2
+        ENDIF
+        g = -dmin * ratio / m                     ' dLoss/dlogp
+        dz[r * 2] = g * z0 / s0 * (1 - mean0 * mean0)
+        dz[r * 2 + 1] = g * z1 / s1 * (1 - mean1 * mean1)
+        g0 = g0 + g * (z0 * z0 - 1)
+        g1 = g1 + g * (z1 * z1 - 1)
+        diff = cv[r] - retmb[r]
+        vl = vl + diff * diff
+        dv[r] = diff / m                          ' d(0.5 * mean(diff^2))/dv
+    NEXT r
+    glog[0] = g0
+    glog[1] = g1
+    RL_COMMON.LOOP_GRADS(net, sca, xmb, m)
+    RL_COMMON.LOOP_GRADS(crit, scc, xmb, m)
+    RETURN -pl / m + 0.5 * vl / m
+ENDFUNC
+
+' ---------------------------------------------------------------- optimiser
+' clip_grad_norm_(all params, 0.5) and one torch Adam step on the flat gradients of the loop path,
+' applied in place to the TORCH parameter arrays (no array is created)
+SUB StepNet(net AS MAP, sc AS MAP, coef AS DOUBLE, step_size AS DOUBLE, sbc2 AS DOUBLE)
+    DIM pids AS ARRAY = net{"pids"}
+    DIM sizes AS ARRAY = net{"sizes"}
+    DIM nl AS INTEGER = net{"nl"}
+    DIM l AS INTEGER = 0
+    DIM k AS INTEGER = 0
+    DIM j AS INTEGER = 0
+    DIM kin AS INTEGER = 0
+    DIM kout AS INTEGER = 0
+    DIM W AS ARRAY = TORCH.PVAL(pids[0])
+    DIM B AS ARRAY = TORCH.PVAL(pids[1])
+    DIM GW AS ARRAY = sc{"gw0"}
+    DIM GB AS ARRAY = sc{"gb0"}
+    DIM MW AS ARRAY = sc{"mw0"}
+    DIM VW AS ARRAY = sc{"vw0"}
+    DIM MB AS ARRAY = sc{"mb0"}
+    DIM VB AS ARRAY = sc{"vb0"}
+    DIM gr AS DOUBLE = 0.0
+    DIM mm AS DOUBLE = 0.0
+    DIM vv AS DOUBLE = 0.0
+    FOR l = 0 TO nl - 1
+        kin = CINT(sizes[l])
+        kout = CINT(sizes[l + 1])
+        W = TORCH.PVAL(pids[2 * l])
+        B = TORCH.PVAL(pids[2 * l + 1])
+        GW = sc{"gw" + STR$(l)}
+        GB = sc{"gb" + STR$(l)}
+        MW = sc{"mw" + STR$(l)}
+        VW = sc{"vw" + STR$(l)}
+        MB = sc{"mb" + STR$(l)}
+        VB = sc{"vb" + STR$(l)}
+        FOR k = 0 TO kin - 1
+            FOR j = 0 TO kout - 1
+                gr = GW[k * kout + j] * coef
+                mm = MW[k * kout + j] * 0.9 + gr * 0.1
+                vv = VW[k * kout + j] * 0.999 + gr * gr * 0.001
+                MW[k * kout + j] = mm
+                VW[k * kout + j] = vv
+                W[k, j] = W[k, j] - (mm / (SQR(vv) / sbc2 + 0.00000001)) * step_size
+            NEXT j
+        NEXT k
+        FOR j = 0 TO kout - 1
+            gr = GB[j] * coef
+            mm = MB[j] * 0.9 + gr * 0.1
+            vv = VB[j] * 0.999 + gr * gr * 0.001
+            MB[j] = mm
+            VB[j] = vv
+            B[0, j] = B[0, j] - (mm / (SQR(vv) / sbc2 + 0.00000001)) * step_size
+        NEXT j
+    NEXT l
+ENDSUB
+
+SUB SqNorm(net AS MAP, sc AS MAP, acc AS ARRAY)
+    DIM sizes AS ARRAY = net{"sizes"}
+    DIM nl AS INTEGER = net{"nl"}
+    DIM l AS INTEGER = 0
+    DIM k AS INTEGER = 0
+    DIM GW AS ARRAY = sc{"gw0"}
+    DIM GB AS ARRAY = sc{"gb0"}
+    DIM s AS DOUBLE = acc[0]
+    FOR l = 0 TO nl - 1
+        GW = sc{"gw" + STR$(l)}
+        GB = sc{"gb" + STR$(l)}
+        FOR k = 0 TO CINT(sizes[l]) * CINT(sizes[l + 1]) - 1
+            s = s + GW[k] * GW[k]
+        NEXT k
+        FOR k = 0 TO CINT(sizes[l + 1]) - 1
+            s = s + GB[k] * GB[k]
+        NEXT k
+    NEXT l
+    acc[0] = s
+ENDSUB
+
+' returns the gradient norm before clipping
+EXPORT FUNC LoopStep(t AS MAP) AS DOUBLE
+    DIM net AS MAP = t{"model"}
+    DIM crit AS MAP = t{"critic"}
+    DIM sca AS MAP = t{"sca"}
+    DIM scc AS MAP = t{"scc"}
+    DIM glog AS ARRAY = t{"glog"}
+    DIM mls AS ARRAY = t{"mls"}
+    DIM vls AS ARRAY = t{"vls"}
+    DIM lsv AS ARRAY = TORCH.PVAL(t{"log_std"})
+    DIM acc AS ARRAY = ZEROS([1])
+    SqNorm(net, sca, acc)
+    SqNorm(crit, scc, acc)
+    acc[0] = acc[0] + glog[0] * glog[0] + glog[1] * glog[1]
+    DIM tot AS DOUBLE = SQR(acc[0])
+    DIM coef AS DOUBLE = MAXNORM / (tot + 0.000001)
+    IF coef > 1 THEN coef = 1
+    t{"adam_t"} = t{"adam_t"} + 1
+    DIM st AS INTEGER = t{"adam_t"}
+    DIM step_size AS DOUBLE = LR / (1 - 0.9 ^ st)
+    DIM sbc2 AS DOUBLE = SQR(1 - 0.999 ^ st)
+    StepNet(net, sca, coef, step_size, sbc2)
+    StepNet(crit, scc, coef, step_size, sbc2)
+    DIM k AS INTEGER = 0
+    DIM gr AS DOUBLE = 0.0
+    DIM mm AS DOUBLE = 0.0
+    DIM vv AS DOUBLE = 0.0
+    FOR k = 0 TO 1
+        gr = glog[k] * coef
+        mm = mls[k] * 0.9 + gr * 0.1
+        vv = vls[k] * 0.999 + gr * gr * 0.001
+        mls[k] = mm
+        vls[k] = vv
+        lsv[0, k] = lsv[0, k] - (mm / (SQR(vv) / sbc2 + 0.00000001)) * step_size
+    NEXT k
+    RETURN tot
+ENDFUNC
+
+' ---------------------------------------------------------------- the update
+SUB Update(t AS MAP)
+    DIM crit AS MAP = t{"critic"}
+    DIM buf AS MAP = t{"buf"}
+    DIM opt AS MAP = t{"opt"}
+    DIM ap AS ARRAY = t{"all_pids"}
+    DIM perm AS ARRAY = t{"perm"}
+    DIM lastv AS ARRAY = t{"lastv"}
+    DIM obs AS ARRAY = t{"obs"}
+    DIM gen AS INTEGER = t{"rng"}
+    DIM n AS INTEGER = t{"n"}
+    DIM rows AS INTEGER = RL_COMMON.ROLLOUT_STEPS * n
+    DIM i AS INTEGER = 0
+    ' last_v = critic(last_obs)
+    DIM cvv AS ARRAY = TORCH.MLP_EVAL(crit, obs)
+    FOR i = 0 TO n - 1
+        lastv[i] = cvv[i, 0]
+    NEXT i
+    Advantages(t, lastv)
+    DIM ep AS INTEGER = 0
+    DIM s AS INTEGER = 0
+    DIM m AS INTEGER = 0
+    DIM loss AS DOUBLE = 0.0
+    DIM nrm AS DOUBLE = 0.0
+    DIM cnt AS INTEGER = 0
+    DIM lsum AS DOUBLE = 0.0
+    FOR ep = 1 TO EPOCHS
+        RL_COMMON.PERMUTE(perm, rows, gen)
+        s = 0
+        WHILE s < rows
+            m = MINIBATCH
+            IF rows - s < m THEN m = rows - s
+            IF t{"loops"} = 1 THEN
+                loss = GradsLoop(t, perm, s, m)
+                nrm = LoopStep(t)
+            ELSE
+                loss = GradsTape(t, perm, s, m)
+                nrm = TORCH.CLIP_GRAD_NORM(ap, MAXNORM)
+                TORCH.ADAM_STEP(opt)
+            ENDIF
+            lsum = lsum + loss
+            cnt = cnt + 1
+            s = s + MINIBATCH
+        WEND
+    NEXT ep
+    t{"loss"} = lsum / cnt
+ENDSUB
+
+EXPORT FUNC LEADER(t AS MAP) AS INTEGER
+    RETURN RL_COMMON.LEADER(t)
+ENDFUNC
+
+EXPORT FUNC ACTS(t AS MAP, i AS INTEGER) AS MAP
+    RETURN RL_COMMON.ACTS(t, i)
+ENDFUNC
+
+EXPORT FUNC SAVE_JSON$(t AS MAP)
+    DIM ap AS ARRAY = t{"all_pids"}
+    RETURN TORCH.SAVE_JSON$(ap)
+ENDFUNC
+
+EXPORT SUB LOAD_JSON(t AS MAP, text$)
+    DIM ap AS ARRAY = t{"all_pids"}
+    TORCH.LOAD_JSON(ap, text$)
+ENDSUB
