@@ -1,0 +1,55 @@
+' REINFORCE gradient check: the scalar-loop gradients (used under -c) must equal the TORCH tape gradients
+' (used by the interpreter) on a random rollout buffer.
+'   tools/jd.sh run tests/reinforce_grad.jdb && tools/jd.sh native tests/reinforce_grad.jdb
+IMPORT TRACK, ENV, REINFORCE, RL_COMMON, TORCH
+DIM tr AS MAP = TRACK.NEW("hard")
+DIM e AS MAP = ENV.NEW(tr, 4, 900, 0)
+DIM t AS MAP = REINFORCE.NEW(e, 0)
+DIM buf AS MAP = t{"buf"}
+DIM net AS MAP = t{"model"}
+DIM gen AS INTEGER = RNG.NEW(7)
+DIM rows AS INTEGER = 128 * 4
+DIM bo AS ARRAY = buf{"obs"}
+DIM ba AS ARRAY = buf{"act"}
+DIM br AS ARRAY = buf{"rew"}
+DIM bd AS ARRAY = buf{"done"}
+DIM i AS INTEGER = 0
+FOR i = 0 TO LEN(bo) - 1
+    bo[i] = RNG.NEXT(gen)
+NEXT i
+FOR i = 0 TO LEN(ba) - 1
+    ba[i] = RNG.NEXT(gen) * 2 - 1
+NEXT i
+FOR i = 0 TO rows - 1
+    br[i] = RNG.NEXT(gen) * 4 - 2
+    IF RNG.NEXT(gen) < 0.1 THEN bd[i] = 1
+NEXT i
+RL_COMMON.RETURNS(buf, 0.97)
+t{"sc_upd"} = RL_COMMON.LOOP_NEW(net, rows)
+DIM ap AS ARRAY = t{"all_pids"}
+DIM lt AS DOUBLE = REINFORCE.GradsTape(t)
+DIM tg AS ARRAY = ZEROS([LEN(ap)])
+DIM g AS ARRAY = TORCH.PGRAD(ap[0])
+DIM saved AS MAP = {}
+FOR i = 0 TO LEN(ap) - 1
+    g = TORCH.PGRAD(ap[i])
+    saved{STR$(i)} = g + 0
+NEXT i
+DIM ll AS DOUBLE = REINFORCE.GradsLoop(t)
+DIM maxd AS DOUBLE = 0.0
+DIM d AS DOUBLE = 0.0
+DIM g2 AS ARRAY = g
+DIM sv AS ARRAY = g
+FOR i = 0 TO LEN(ap) - 1
+    g2 = TORCH.PGRAD(ap[i])
+    sv = saved{STR$(i)}
+    d = MAX(ABS(g2 - sv))
+    IF d > maxd THEN maxd = d
+NEXT i
+PRINT "loss tape "; lt; "  loop "; ll
+PRINT "max grad diff "; FORMAT$("{:.3e}", maxd)
+IF ABS(lt - ll) < 0.000001 AND maxd < 0.000001 THEN
+    PRINT "PASS"
+ELSE
+    PRINT "FAIL"
+ENDIF
