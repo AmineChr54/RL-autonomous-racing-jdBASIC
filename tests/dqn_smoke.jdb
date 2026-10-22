@@ -1,0 +1,19 @@
+' DQN smoke test: N iterations, 200 cars, hard track, 900 max steps, seed 0.
+'   tools/jd.sh run|native tests/dqn_smoke.jdb 3
+IMPORT TRACK, ENV, DQN, RL_COMMON
+DIM tr AS MAP = TRACK.NEW("hard")
+DIM e AS MAP = ENV.NEW(tr, 200, 900, 0)
+DIM t AS MAP = DQN.NEW(e, 0)
+DIM iters AS INTEGER = CINT(VAL(OS.ARGS()[1]))
+DIM t0 AS DOUBLE = TICK()
+WHILE t{"generation"} <= iters
+    IF DQN.ADVANCE(t) = 1 THEN
+        PRINT RL_COMMON.HEADLINE$(t, (TICK() - t0) / 1000); "  eps "; FORMAT$("{:.2f}", DQN.EPSILON(t)); "  loss "; FORMAT$("{:.3f}", t{"loss"})
+    ENDIF
+WEND
+PRINT "s/iteration: "; (TICK() - t0) / 1000 / iters
+DIM am AS MAP = DQN.ACTS(t, 0)
+PRINT "leader "; DQN.LEADER(t); "  layers "; am{"n"}
+DIM js$ = DQN.SAVE_JSON$(t)
+DQN.LOAD_JSON(t, js$)
+PRINT "json bytes "; LEN(js$)

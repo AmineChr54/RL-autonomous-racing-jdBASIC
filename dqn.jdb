@@ -1,0 +1,458 @@
+' dqn.jdb - DQN (Deep Q-Network): learn "how good is each action right now?".
+'
+' The network outputs one number per action (a Q-value = expected future reward if I do this action). The car
+' picks the action with the highest Q (and sometimes a random one, to explore). Learning target:
+'     Q(s, a)  ->  reward + gamma * best Q_target(next state)          (bootstrapping)
+' Steering is discretised into 5 choices, throttle is fixed.
+'
+' Two equivalent implementations of acting and of the learn step (checked against each other in tests/dqn_grad.jdb):
+'   * interpreter: vector code on the TORCH tape (GATHERCOL + SMOOTH_L1), TORCH Adam / clip / polyak;
+'   * compiled (-c): a compiled program never frees an array temporary and DQN does 256 learn steps per iteration,
+'     so there EVERYTHING (forward, target forward, gradients, clip, Adam, polyak) is scalar loops over flat
+'     preallocated arrays. The weights live in the scratch (RL_COMMON.LOOP_*_W); they are copied back to the TORCH
+'     params (for the brain visualiser and saving) at the end of every iteration.
+' The replay buffer is flat 1-D arrays only (a 2-D 150000 x 8 ZEROS took 14.5 GB natively).
+
+EXPORT MODULE DQN
+IMPORT ENV, TORCH, RL_COMMON
+
+CONST THROTTLE = 0.6
+CONST GAMMA = 0.97
+CONST LR = 0.001
+CONST BATCH = 512
+CONST UPDATES_PER_STEP = 2
+CONST BUFFER = 150000
+CONST WARMUP = 5000
+CONST EPS_START = 1.0
+CONST EPS_END = 0.05
+CONST EPS_DECAY_STEPS = 3000
+CONST TAU = 0.01
+CONST CLIP = 5.0
+CONST NACT = 5                          ' steering choices -1, -0.5, 0, 0.5, 1  (steer = (choice - 2) / 2)
+
+EXPORT FUNC NEW(e AS MAP, seed) AS MAP
+    DIM t = RL_COMMON.INIT(e, seed, "dqn", "DQN")
+    DIM gen AS INTEGER = t{"rng"}
+    DIM n AS INTEGER = e{"n"}
+    DIM od AS INTEGER = ENV.OBS_DIM
+    DIM net AS MAP = TORCH.MLP_NEW([od, 64, 64, NACT], gen)
+    DIM tgt AS MAP = TORCH.MLP_NEW([od, 64, 64, NACT], gen)
+    DIM mp AS ARRAY = TORCH.MLP_PIDS(net)
+    DIM tp AS ARRAY = TORCH.MLP_PIDS(tgt)
+    TORCH.COPY_PARAMS(tp, mp)                                   ' target = copy of the model at the start
+    t{"model"} = net
+    t{"target"} = tgt
+    t{"opt"} = TORCH.ADAM_NEW(mp, LR)
+    t{"ptr"} = 0
+    t{"size"} = 0
+    t{"total_ticks"} = 0
+    t{"ro"} = ZEROS([BUFFER * od])
+    t{"ra"} = ZEROS([BUFFER])
+    t{"rr"} = ZEROS([BUFFER])
+    t{"rn"} = ZEROS([BUFFER * od])
+    t{"rd"} = ZEROS([BUFFER])
+    t{"bo"} = ZEROS([BATCH * od])                               ' the sampled minibatch
+    t{"bn"} = ZEROS([BATCH * od])
+    t{"ba"} = ZEROS([BATCH])
+    t{"br"} = ZEROS([BATCH])
+    t{"bd"} = ZEROS([BATCH])
+    t{"by"} = ZEROS([BATCH])
+    t{"act"} = TORCH.ZEROS_RC(n, 2)
+    t{"choice"} = ZEROS([n])
+    t{"obsf"} = ZEROS([n * od])
+    t{"raw"} = ZEROS([n * NACT])
+    t{"loss"} = 0.0
+    t{"loops"} = RL_COMMON.LOOPS()
+    t{"sc"} = RL_COMMON.LOOP_NEW(net, 1)
+    t{"sct"} = RL_COMMON.LOOP_NEW(tgt, 1)
+    IF t{"loops"} = 1 THEN
+        DIM sc AS MAP = RL_COMMON.LOOP_NEW(net, BATCH)
+        DIM sct AS MAP = RL_COMMON.LOOP_NEW(tgt, BATCH)
+        RL_COMMON.LOOP_LOAD(net, sc)
+        RL_COMMON.LOOP_LOAD(tgt, sct)
+        t{"sc"} = sc
+        t{"sct"} = sct
+        ' flat Adam state
+        DIM am AS MAP = {}
+        DIM l AS INTEGER = 0
+        DIM w AS ARRAY = sc{"w0"}
+        DIM b AS ARRAY = sc{"b0"}
+        FOR l = 0 TO CINT(net{"nl"}) - 1
+            w = sc{"w" + STR$(l)}
+            b = sc{"b" + STR$(l)}
+            am{"mw" + STR$(l)} = ZEROS([LEN(w)])
+            am{"vw" + STR$(l)} = ZEROS([LEN(w)])
+            am{"mb" + STR$(l)} = ZEROS([LEN(b)])
+            am{"vb" + STR$(l)} = ZEROS([LEN(b)])
+        NEXT l
+        am{"t"} = 0
+        t{"adam"} = am
+    ENDIF
+    RETURN t
+ENDFUNC
+
+EXPORT FUNC EPSILON(t AS MAP) AS DOUBLE
+    DIM tk AS DOUBLE = t{"total_ticks"}
+    DIM v AS DOUBLE = EPS_START - (EPS_START - EPS_END) * tk / EPS_DECAY_STEPS
+    IF v < EPS_END THEN v = EPS_END
+    RETURN v
+ENDFUNC
+
+' epsilon-greedy over the 5 steering choices -> t{"act"} (N x 2) and t{"choice"} (N)
+FUNC SelectActions(t AS MAP, obs AS ARRAY) AS ARRAY
+    DIM net AS MAP = t{"model"}
+    DIM gen AS INTEGER = t{"rng"}
+    DIM n AS INTEGER = t{"n"}
+    DIM act AS ARRAY = t{"act"}
+    DIM ch AS ARRAY = t{"choice"}
+    DIM od AS INTEGER = ENV.OBS_DIM
+    DIM eps AS DOUBLE = EPSILON(t)
+    DIM raw AS ARRAY = t{"raw"}
+    DIM i AS INTEGER = 0
+    DIM k AS INTEGER = 0
+    DIM g AS INTEGER = 0
+    DIM c AS INTEGER = 0
+    DIM bv AS DOUBLE = 0.0
+    DIM v AS DOUBLE = 0.0
+    IF t{"loops"} = 1 THEN
+        DIM sc AS MAP = t{"sc"}
+        DIM obsf AS ARRAY = t{"obsf"}
+        FOR i = 0 TO n - 1
+            FOR k = 0 TO od - 1
+                obsf[i * od + k] = obs[i, k]
+            NEXT k
+        NEXT i
+        RL_COMMON.LOOP_FWD_W(net, sc, obsf, n)
+        raw = sc{"a2"}
+    ELSE
+        DIM q2 AS ARRAY = TORCH.MLP_EVAL(net, obs)
+        FOR i = 0 TO n - 1
+            FOR k = 0 TO NACT - 1
+                raw[i * NACT + k] = q2[i, k]
+            NEXT k
+        NEXT i
+    ENDIF
+    FOR i = 0 TO n - 1
+        g = 0
+        bv = raw[i * NACT]
+        FOR k = 1 TO NACT - 1
+            v = raw[i * NACT + k]
+            IF v > bv THEN
+                bv = v
+                g = k
+            ENDIF
+        NEXT k
+        c = g
+        IF RNG.NEXT(gen) < eps THEN c = CINT(RNG.INT(gen, 0, NACT - 1))
+        ch[i] = c
+        act[i, 0] = (c - 2) * 0.5
+        act[i, 1] = THROTTLE
+    NEXT i
+    RETURN act
+ENDFUNC
+
+' one env tick (+ learning once the buffer holds WARMUP transitions); returns 1 when an iteration just finished
+EXPORT FUNC ADVANCE(t AS MAP) AS INTEGER
+    DIM e AS MAP = t{"env"}
+    DIM obs AS ARRAY = t{"obs"}
+    DIM act AS ARRAY = SelectActions(t, obs)
+    ' the pre-tick observation must be copied before ENV.TICK overwrites it in place
+    DIM n AS INTEGER = t{"n"}
+    DIM od AS INTEGER = ENV.OBS_DIM
+    DIM ptr AS INTEGER = t{"ptr"}
+    DIM ro AS ARRAY = t{"ro"}
+    DIM ra AS ARRAY = t{"ra"}
+    DIM rr AS ARRAY = t{"rr"}
+    DIM rn AS ARRAY = t{"rn"}
+    DIM rd AS ARRAY = t{"rd"}
+    DIM ch AS ARRAY = t{"choice"}
+    DIM i AS INTEGER = 0
+    DIM k AS INTEGER = 0
+    DIM row AS INTEGER = 0
+    FOR i = 0 TO n - 1
+        row = (ptr + i) MOD BUFFER
+        FOR k = 0 TO od - 1
+            ro[row * od + k] = obs[i, k]
+        NEXT k
+        ra[row] = ch[i]
+    NEXT i
+    t{"obs"} = ENV.TICK(e, act)
+    DIM nxt AS ARRAY = e{"obs"}
+    DIM rew AS ARRAY = e{"reward"}
+    DIM done AS ARRAY = e{"done"}
+    FOR i = 0 TO n - 1
+        row = (ptr + i) MOD BUFFER
+        FOR k = 0 TO od - 1
+            rn[row * od + k] = nxt[i, k]
+        NEXT k
+        rr[row] = rew[i]
+        rd[row] = done[i]
+    NEXT i
+    t{"ptr"} = (ptr + n) MOD BUFFER
+    DIM sz AS INTEGER = t{"size"} + n
+    IF sz > BUFFER THEN sz = BUFFER
+    t{"size"} = sz
+    t{"total_ticks"} = t{"total_ticks"} + 1
+    IF sz >= WARMUP THEN
+        FOR i = 1 TO UPDATES_PER_STEP
+            Learn(t)
+        NEXT i
+    ENDIF
+    t{"ticks"} = t{"ticks"} + 1
+    IF t{"ticks"} >= RL_COMMON.ROLLOUT_STEPS THEN
+        t{"ticks"} = 0
+        IF t{"loops"} = 1 THEN
+            DIM net AS MAP = t{"model"}
+            DIM sc AS MAP = t{"sc"}
+            RL_COMMON.LOOP_STORE(net, sc)
+        ENDIF
+        RL_COMMON.FINISH_ITERATION(t)
+        RETURN 1
+    ENDIF
+    RETURN 0
+ENDFUNC
+
+' minibatch of BATCH random transitions -> t{"bo"} t{"bn"} (flat BATCH x 8) and ba br bd
+EXPORT SUB SampleBatch(t AS MAP)
+    DIM gen AS INTEGER = t{"rng"}
+    DIM size AS INTEGER = t{"size"}
+    DIM od AS INTEGER = ENV.OBS_DIM
+    DIM ro AS ARRAY = t{"ro"}
+    DIM ra AS ARRAY = t{"ra"}
+    DIM rr AS ARRAY = t{"rr"}
+    DIM rn AS ARRAY = t{"rn"}
+    DIM rd AS ARRAY = t{"rd"}
+    DIM bo AS ARRAY = t{"bo"}
+    DIM bn AS ARRAY = t{"bn"}
+    DIM ba AS ARRAY = t{"ba"}
+    DIM br AS ARRAY = t{"br"}
+    DIM bd AS ARRAY = t{"bd"}
+    DIM r AS INTEGER = 0
+    DIM k AS INTEGER = 0
+    DIM j AS INTEGER = 0
+    FOR r = 0 TO BATCH - 1
+        j = CINT(RNG.INT(gen, 0, size - 1))
+        FOR k = 0 TO od - 1
+            bo[r * od + k] = ro[j * od + k]
+            bn[r * od + k] = rn[j * od + k]
+        NEXT k
+        ba[r] = ra[j]
+        br[r] = rr[j]
+        bd[r] = rd[j]
+    NEXT r
+ENDSUB
+
+' gradients of the smooth-L1 DQN loss on the minibatch in t, tape version -> PGRAD of the model; returns the loss
+EXPORT FUNC GradsTape(t AS MAP) AS DOUBLE
+    DIM net AS MAP = t{"model"}
+    DIM tgt AS MAP = t{"target"}
+    DIM mp AS ARRAY = TORCH.MLP_PIDS(net)
+    DIM od AS INTEGER = ENV.OBS_DIM
+    DIM bo AS ARRAY = t{"bo"}
+    DIM bn AS ARRAY = t{"bn"}
+    DIM ba AS ARRAY = t{"ba"}
+    DIM br AS ARRAY = t{"br"}
+    DIM bd AS ARRAY = t{"bd"}
+    DIM by AS ARRAY = t{"by"}
+    DIM qn AS ARRAY = TORCH.MLP_EVAL(tgt, RESHAPE(bn, [BATCH, od]))
+    DIM r AS INTEGER = 0
+    DIM k AS INTEGER = 0
+    DIM m AS DOUBLE = 0.0
+    FOR r = 0 TO BATCH - 1
+        m = qn[r, 0]
+        FOR k = 1 TO NACT - 1
+            IF qn[r, k] > m THEN m = qn[r, k]
+        NEXT k
+        by[r] = br[r] + GAMMA * (1 - bd[r]) * m                 ' "reward + best future"
+    NEXT r
+    TORCH.RESET()
+    DIM q AS INTEGER = TORCH.GATHERCOL(TORCH.MLP_FWD(net, TORCH.C(RESHAPE(bo, [BATCH, od]))), ba)
+    DIM loss AS INTEGER = TORCH.SMOOTH_L1(q, RESHAPE(by, [BATCH, 1]))
+    TORCH.ZERO_GRAD(mp)
+    TORCH.BACKWARD(loss)
+    DIM lv AS DOUBLE = TORCH.ITEM(loss)
+    TORCH.RESET()
+    RETURN lv
+ENDFUNC
+
+' the same gradients with scalar loops; the weights are the scratch ones (RL_COMMON.LOOP_LOAD); the gradients stay in
+' sc{"gw<l>"} / sc{"gb<l>"}; returns the loss
+EXPORT FUNC GradsLoop(t AS MAP) AS DOUBLE
+    DIM net AS MAP = t{"model"}
+    DIM tgt AS MAP = t{"target"}
+    DIM sc AS MAP = t{"sc"}
+    DIM sct AS MAP = t{"sct"}
+    DIM bo AS ARRAY = t{"bo"}
+    DIM bn AS ARRAY = t{"bn"}
+    DIM ba AS ARRAY = t{"ba"}
+    DIM br AS ARRAY = t{"br"}
+    DIM bd AS ARRAY = t{"bd"}
+    RL_COMMON.LOOP_FWD_W(tgt, sct, bn, BATCH)
+    RL_COMMON.LOOP_FWD_W(net, sc, bo, BATCH)
+    DIM qt AS ARRAY = sct{"a2"}
+    DIM qm AS ARRAY = sc{"a2"}
+    DIM dz AS ARRAY = sc{"d2"}
+    DIM r AS INTEGER = 0
+    DIM k AS INTEGER = 0
+    DIM a AS INTEGER = 0
+    DIM m AS DOUBLE = 0.0
+    DIM y AS DOUBLE = 0.0
+    DIM d AS DOUBLE = 0.0
+    DIM ad AS DOUBLE = 0.0
+    DIM loss AS DOUBLE = 0.0
+    DIM inv AS DOUBLE = 1.0 / BATCH
+    FOR r = 0 TO BATCH - 1
+        m = qt[r * NACT]
+        FOR k = 1 TO NACT - 1
+            IF qt[r * NACT + k] > m THEN m = qt[r * NACT + k]
+        NEXT k
+        y = br[r] + GAMMA * (1 - bd[r]) * m
+        a = CINT(ba[r])
+        d = qm[r * NACT + a] - y
+        ad = ABS(d)
+        IF ad < 1 THEN
+            loss = loss + 0.5 * d * d * inv
+        ELSE
+            loss = loss + (ad - 0.5) * inv
+        ENDIF
+        IF d > 1 THEN d = 1
+        IF d < -1 THEN d = -1
+        FOR k = 0 TO NACT - 1
+            dz[r * NACT + k] = 0
+        NEXT k
+        dz[r * NACT + a] = d * inv
+    NEXT r
+    RL_COMMON.LOOP_BWD_W(net, sc, bo, BATCH)
+    RETURN loss
+ENDFUNC
+
+SUB AdamFlat(p AS ARRAY, g AS ARRAY, mm AS ARRAY, vv AS ARRAY, coef AS DOUBLE, stp AS DOUBLE, sbc2 AS DOUBLE)
+    DIM i AS INTEGER = 0
+    DIM gi AS DOUBLE = 0.0
+    DIM mi AS DOUBLE = 0.0
+    DIM vi AS DOUBLE = 0.0
+    FOR i = 0 TO LEN(p) - 1
+        gi = g[i] * coef
+        mi = mm[i] * 0.9 + gi * 0.1
+        vi = vv[i] * 0.999 + gi * gi * 0.001
+        mm[i] = mi
+        vv[i] = vi
+        p[i] = p[i] - stp * mi / (SQR(vi) / sbc2 + 0.00000001)
+    NEXT i
+ENDSUB
+
+SUB PolyakFlat(dst AS ARRAY, src AS ARRAY)
+    DIM i AS INTEGER = 0
+    FOR i = 0 TO LEN(dst) - 1
+        dst[i] = dst[i] * (1 - TAU) + src[i] * TAU
+    NEXT i
+ENDSUB
+
+FUNC SumSq(g AS ARRAY) AS DOUBLE
+    DIM i AS INTEGER = 0
+    DIM s AS DOUBLE = 0.0
+    FOR i = 0 TO LEN(g) - 1
+        s = s + g[i] * g[i]
+    NEXT i
+    RETURN s
+ENDFUNC
+
+' clip to norm 5, Adam step, polyak, all on the scratch arrays
+SUB StepLoop(t AS MAP)
+    DIM net AS MAP = t{"model"}
+    DIM sc AS MAP = t{"sc"}
+    DIM sct AS MAP = t{"sct"}
+    DIM am AS MAP = t{"adam"}
+    DIM nl AS INTEGER = net{"nl"}
+    DIM l AS INTEGER = 0
+    DIM tot AS DOUBLE = 0.0
+    DIM g AS ARRAY = sc{"gw0"}
+    DIM p AS ARRAY = sc{"w0"}
+    DIM mm AS ARRAY = sc{"w0"}
+    DIM vv AS ARRAY = sc{"w0"}
+    FOR l = 0 TO nl - 1
+        g = sc{"gw" + STR$(l)}
+        tot = tot + SumSq(g)
+        g = sc{"gb" + STR$(l)}
+        tot = tot + SumSq(g)
+    NEXT l
+    DIM coef AS DOUBLE = CLIP / (SQR(tot) + 0.000001)
+    IF coef > 1 THEN coef = 1
+    am{"t"} = am{"t"} + 1
+    DIM st AS DOUBLE = am{"t"}
+    DIM stp AS DOUBLE = LR / (1 - 0.9 ^ st)
+    DIM sbc2 AS DOUBLE = SQR(1 - 0.999 ^ st)
+    FOR l = 0 TO nl - 1
+        p = sc{"w" + STR$(l)}
+        g = sc{"gw" + STR$(l)}
+        mm = am{"mw" + STR$(l)}
+        vv = am{"vw" + STR$(l)}
+        AdamFlat(p, g, mm, vv, coef, stp, sbc2)
+        p = sc{"b" + STR$(l)}
+        g = sc{"gb" + STR$(l)}
+        mm = am{"mb" + STR$(l)}
+        vv = am{"vb" + STR$(l)}
+        AdamFlat(p, g, mm, vv, coef, stp, sbc2)
+    NEXT l
+    DIM q AS ARRAY = sct{"w0"}
+    FOR l = 0 TO nl - 1
+        p = sc{"w" + STR$(l)}
+        q = sct{"w" + STR$(l)}
+        PolyakFlat(q, p)
+        p = sc{"b" + STR$(l)}
+        q = sct{"b" + STR$(l)}
+        PolyakFlat(q, p)
+    NEXT l
+ENDSUB
+
+' one learn step (_learn): sample, loss, clip, Adam, polyak
+SUB Learn(t AS MAP)
+    DIM net AS MAP = t{"model"}
+    DIM tgt AS MAP = t{"target"}
+    SampleBatch(t)
+    DIM loss AS DOUBLE = 0.0
+    IF t{"loops"} = 1 THEN
+        loss = GradsLoop(t)
+        StepLoop(t)
+    ELSE
+        DIM mp AS ARRAY = TORCH.MLP_PIDS(net)
+        DIM tp AS ARRAY = TORCH.MLP_PIDS(tgt)
+        DIM opt AS MAP = t{"opt"}
+        loss = GradsTape(t)
+        DIM nrm AS DOUBLE = TORCH.CLIP_GRAD_NORM(mp, CLIP)
+        TORCH.ADAM_STEP(opt)
+        TORCH.POLYAK(tp, mp, TAU)
+    ENDIF
+    t{"loss"} = loss
+ENDSUB
+
+EXPORT FUNC LEADER(t AS MAP) AS INTEGER
+    RETURN RL_COMMON.LEADER(t)
+ENDFUNC
+
+EXPORT FUNC ACTS(t AS MAP, i AS INTEGER) AS MAP
+    RETURN RL_COMMON.ACTS(t, i)
+ENDFUNC
+
+EXPORT FUNC SAVE_JSON$(t AS MAP)
+    DIM net AS MAP = t{"model"}
+    DIM sc AS MAP = t{"sc"}
+    IF t{"loops"} = 1 THEN RL_COMMON.LOOP_STORE(net, sc)
+    DIM mp AS ARRAY = TORCH.MLP_PIDS(net)
+    RETURN TORCH.SAVE_JSON$(mp)
+ENDFUNC
+
+EXPORT SUB LOAD_JSON(t AS MAP, text$)
+    DIM net AS MAP = t{"model"}
+    DIM tgt AS MAP = t{"target"}
+    DIM mp AS ARRAY = TORCH.MLP_PIDS(net)
+    DIM tp AS ARRAY = TORCH.MLP_PIDS(tgt)
+    TORCH.LOAD_JSON(mp, text$)
+    TORCH.COPY_PARAMS(tp, mp)
+    IF t{"loops"} = 1 THEN
+        DIM sc AS MAP = t{"sc"}
+        DIM sct AS MAP = t{"sct"}
+        RL_COMMON.LOOP_LOAD(net, sc)
+        RL_COMMON.LOOP_LOAD(tgt, sct)
+    ENDIF
+ENDSUB
