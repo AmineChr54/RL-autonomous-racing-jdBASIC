@@ -64,3 +64,6 @@ jobs:
       - name: brain_parity
         timeout-minutes: 10
         run: python tests/brain_parity.py && python tests/brain_parity.py --native
+      - name: main.jdb headless smoke (interpreter all modes, native evolution + dqn)
+        timeout-minutes: 8
+        run: tests/main_smoke.sh && tests/main_smoke.sh native

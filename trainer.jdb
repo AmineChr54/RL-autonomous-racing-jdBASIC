@@ -1,0 +1,80 @@
+' trainer.jdb - make_trainer from main.py: one interface over the four learners.
+'
+'   DIM t AS MAP = TRAINER.NEW("evolution", track, 200, 900, 0)
+'   IF TRAINER.ADVANCE(t) = 1 THEN ...      ' one env tick; 1 when a generation / iteration just finished
+' Dispatch is IF on t{"mode"} (SWITCH on a map value never matches under -c, see STATUS.md bug 7).
+' Modes: evolution, reinforce, dqn, ppo. Same seed rule as Python: the env and the trainer both get `seed`.
+
+EXPORT MODULE TRAINER
+IMPORT TRACK, ENV, EVOLUTION, REINFORCE, DQN, PPO
+
+EXPORT FUNC VALID_MODE(mode$) AS INTEGER
+    IF mode$ = "evolution" THEN RETURN 1
+    IF mode$ = "reinforce" THEN RETURN 1
+    IF mode$ = "dqn" THEN RETURN 1
+    IF mode$ = "ppo" THEN RETURN 1
+    RETURN 0
+ENDFUNC
+
+EXPORT FUNC NEW(mode$, tr AS MAP, n AS INTEGER, max_steps AS INTEGER, seed AS INTEGER) AS MAP
+    DIM e AS MAP = ENV.NEW(tr, n, max_steps, seed)
+    DIM t AS MAP
+    IF mode$ = "evolution" THEN
+        t = EVOLUTION.NEW(e, seed)
+    ELSEIF mode$ = "reinforce" THEN
+        t = REINFORCE.NEW(e, seed)
+    ELSEIF mode$ = "dqn" THEN
+        t = DQN.NEW(e, seed)
+    ELSEIF mode$ = "ppo" THEN
+        t = PPO.NEW(e, seed)
+    ELSE
+        PRINT "TRAINER.NEW: unknown mode "; mode$
+        END 2
+    ENDIF
+    RETURN t
+ENDFUNC
+
+EXPORT FUNC ADVANCE(t AS MAP) AS INTEGER
+    DIM m$ = t{"mode"}
+    IF m$ = "evolution" THEN RETURN EVOLUTION.ADVANCE(t)
+    IF m$ = "reinforce" THEN RETURN REINFORCE.ADVANCE(t)
+    IF m$ = "dqn" THEN RETURN DQN.ADVANCE(t)
+    RETURN PPO.ADVANCE(t)
+ENDFUNC
+
+EXPORT FUNC LEADER(t AS MAP) AS INTEGER
+    DIM m$ = t{"mode"}
+    IF m$ = "evolution" THEN RETURN EVOLUTION.LEADER(t)
+    IF m$ = "reinforce" THEN RETURN REINFORCE.LEADER(t)
+    IF m$ = "dqn" THEN RETURN DQN.LEADER(t)
+    RETURN PPO.LEADER(t)
+ENDFUNC
+
+EXPORT FUNC ACTS(t AS MAP, i AS INTEGER) AS MAP
+    DIM m$ = t{"mode"}
+    IF m$ = "evolution" THEN RETURN EVOLUTION.ACTS(t, i)
+    IF m$ = "reinforce" THEN RETURN REINFORCE.ACTS(t, i)
+    IF m$ = "dqn" THEN RETURN DQN.ACTS(t, i)
+    RETURN PPO.ACTS(t, i)
+ENDFUNC
+
+EXPORT FUNC SAVE_JSON$(t AS MAP)
+    DIM m$ = t{"mode"}
+    IF m$ = "evolution" THEN RETURN EVOLUTION.SAVE_JSON$(t)
+    IF m$ = "reinforce" THEN RETURN REINFORCE.SAVE_JSON$(t)
+    IF m$ = "dqn" THEN RETURN DQN.SAVE_JSON$(t)
+    RETURN PPO.SAVE_JSON$(t)
+ENDFUNC
+
+EXPORT SUB LOAD_JSON(t AS MAP, text$)
+    DIM m$ = t{"mode"}
+    IF m$ = "evolution" THEN
+        EVOLUTION.LOAD_JSON(t, text$)
+    ELSEIF m$ = "reinforce" THEN
+        REINFORCE.LOAD_JSON(t, text$)
+    ELSEIF m$ = "dqn" THEN
+        DQN.LOAD_JSON(t, text$)
+    ELSE
+        PPO.LOAD_JSON(t, text$)
+    ENDIF
+ENDSUB

@@ -1,0 +1,63 @@
+' main.jdb - swarm racing, port of main.py.
+'   tools/jd.sh native main.jdb --headless --mode evolution --gens 30
+' Headless prints Python's line:
+'   Neuroevolution gen   1  best     123px (0.04 laps)  mean      45px  [  5.2s]
+' The GUI (pygame in Python) is not ported yet; --device is accepted and ignored (no accelerator backends here).
+IMPORT CLI, TRACK, TRAINER, RL_COMMON
+
+CONST MAX_STEPS = 900      ' time limit per attempt (ticks); top speed is 6 px/tick, a lap of the hard track needs >= 530
+
+DIM spec AS MAP = CLI.NEW("main", "Swarm racing: watch a population of cars learn to drive.")
+CLI.OPT(spec, "mode", "", "evolution | reinforce | dqn | ppo", "evolution")
+CLI.NUM(spec, "cars", "", "number of cars", 200)
+CLI.OPT(spec, "device", "", "accepted for compatibility, ignored", "auto")
+CLI.OPT(spec, "track", "", "easy | hard", "hard")
+CLI.NUM(spec, "max-steps", "", "time limit per attempt, in ticks", MAX_STEPS)
+CLI.FLAG(spec, "headless", "", "no window, print progress")
+CLI.NUM(spec, "gens", "", "generations / iterations to run (headless)", 30)
+CLI.OPT(spec, "shot", "", "save a screenshot to this path after --shot-gen generations, then exit", "")
+CLI.NUM(spec, "shot-gen", "", "generation for --shot", 5)
+CLI.OPT(spec, "record", "", "save a GIF of the window to this path, then exit", "")
+CLI.NUM(spec, "record-from", "", "generation/iteration at which recording starts", 1)
+CLI.NUM(spec, "record-frames", "", "frames to record", 70)
+CLI.NUM(spec, "record-stride", "", "simulation ticks per recorded frame", 3)
+DIM got AS MAP = CLI.PARSE(spec, CLI.ARGV())
+IF CLI.DONE(spec, got) THEN END CLI.STATUS(got)
+
+DIM mode$ = got{"mode"}
+DIM trackname$ = got{"track"}
+DIM cars AS INTEGER = CINT(got{"cars"})
+DIM maxsteps AS INTEGER = CINT(got{"max-steps"})
+DIM gens AS INTEGER = CINT(got{"gens"})
+DIM headless AS INTEGER = 0
+IF got{"headless"} THEN headless = 1
+
+IF TRAINER.VALID_MODE(mode$) = 0 THEN
+    PRINT "main: argument --mode: invalid choice: '"; mode$; "' (choose from evolution, reinforce, dqn, ppo)"
+    END 2
+ENDIF
+IF trackname$ <> "easy" AND trackname$ <> "hard" THEN
+    PRINT "main: argument --track: invalid choice: '"; trackname$; "' (choose from easy, hard)"
+    END 2
+ENDIF
+
+IF headless = 0 THEN
+    PRINT "GUI not implemented yet (use --headless)"
+    END 0
+ENDIF
+
+DIM tr AS MAP = TRACK.NEW(trackname$)
+DIM t AS MAP = TRAINER.NEW(mode$, tr, cars, maxsteps, 0)
+DIM t0 AS DOUBLE = TICK()
+DIM seen AS INTEGER = 0
+DIM hb AS ARRAY = [0]
+' Python: while tr.generation <= args.gens: tr.step(); print a line whenever the history grew
+WHILE t{"generation"} <= gens
+    IF TRAINER.ADVANCE(t) = 1 THEN
+        hb = t{"hist_best"}
+        IF LEN(hb) > seen THEN
+            seen = LEN(hb)
+            PRINT RL_COMMON.HEADLINE$(t, (TICK() - t0) / 1000)
+        ENDIF
+    ENDIF
+WEND

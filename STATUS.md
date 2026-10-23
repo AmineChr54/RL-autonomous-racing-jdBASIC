@@ -77,11 +77,16 @@ Like REINFORCE, the compiled path runs forward, target forward, gradients, clip,
 `tests/dqn_grad.jdb` checks both give the same loss and gradients (max diff 1.4e-17, both backends). The replay buffer is flat 1-D arrays (150000 transitions).
 `TORCH.LOAD_JSON` is broken under -c (#45), so `tests/dqn_smoke.jdb` only reloads the saved brain when interpreted.
 
+## trainer.jdb + main.jdb (issue #24)
+`trainer.jdb` = `make_trainer` (NEW/ADVANCE/LEADER/ACTS/SAVE_JSON$/LOAD_JSON, IF dispatch on `t{"mode"}`). `main.jdb` parses flags with `lib/cli.jdb`
+(`--mode --cars --track --max-steps --headless --gens --shot --shot-gen --record --record-from --record-frames --record-stride`; `--device` accepted and ignored).
+Headless prints Python's line via `RL_COMMON.HEADLINE$`. Without `--headless` it prints "GUI not implemented yet" (#25); `--shot`/`--record` are parsed only.
+`tools/jd.sh native main.jdb --headless --mode evolution --gens 3`: 5.6-6.0 s/generation, peak 83 MB. REINFORCE 5.4 s/iteration, peak 82 MB. Test: `tests/main_smoke.sh [native]`.
+
 ## CI (issue #43)
 The runner image builds jdBasic from upstream source on Linux (g++, LLVM 18, no Wine; pinned commit, see `ci/README.md`). The `jdbasic` job runs torch_gradcheck, track_check, reinforce_grad (interpreter and `-c`), env_parity and brain_parity (both backends); results equal the Windows build (parity diffs 2.2e-16, gradcheck 20/20). The old Wine job is gone.
 
 ## Work tracking
 Everything open is a GitHub issue: https://github.com/AmineChr54/RL-autonomous-racing-jdBASIC/issues
-(#19 local CI, #24 trainer + headless main,
-#25 GUI, #26 plot_curves, #27 bench, #28 PyTorch cross-check, #29 COMPARISON.md).
+(#25 GUI, #26 plot_curves, #27 bench, #28 PyTorch cross-check, #29 COMPARISON.md).
 Done work and the jdBasic bugs above are closed issues #1-#18.
