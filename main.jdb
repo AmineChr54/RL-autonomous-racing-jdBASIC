@@ -2,10 +2,31 @@
 '   tools/jd.sh native main.jdb --headless --mode evolution --gens 30
 ' Headless prints Python's line:
 '   Neuroevolution gen   1  best     123px (0.04 laps)  mean      45px  [  5.2s]
-' The GUI (pygame in Python) is not ported yet; --device is accepted and ignored (no accelerator backends here).
-IMPORT CLI, TRACK, TRAINER, RL_COMMON
+' Without --headless: the 1400 x 700 jdBasic GFX window (gui.jdb). Keys: 1-4 mode, +/- speed, F turbo, S/L save/load
+' saves/<mode>.json, R restart, Esc quit. --shot / --record write a PNG (sequence) and exit.
+' --device is accepted and ignored (no accelerator backends here).
+IMPORT CLI, TRACK, TRAINER, RL_COMMON, GUI
 
 CONST MAX_STEPS = 900      ' time limit per attempt (ticks); top speed is 6 px/tick, a lap of the hard track needs >= 530
+
+DIM gKey AS INTEGER = 0
+DIM gQuit AS INTEGER = 0
+
+SUB OnKey(info AS ARRAY)
+    DIM m AS MAP = info[0]
+    gKey = CINT(m{"keycode"})
+ENDSUB
+
+SUB OnQuit(info AS ARRAY)
+    gQuit = 1
+ENDSUB
+
+FUNC MODE_OF$(i AS INTEGER)
+    IF i = 0 THEN RETURN "evolution"
+    IF i = 1 THEN RETURN "reinforce"
+    IF i = 2 THEN RETURN "dqn"
+    RETURN "ppo"
+ENDFUNC
 
 DIM spec AS MAP = CLI.NEW("main", "Swarm racing: watch a population of cars learn to drive.")
 CLI.OPT(spec, "mode", "", "evolution | reinforce | dqn | ppo", "evolution")
@@ -17,7 +38,7 @@ CLI.FLAG(spec, "headless", "", "no window, print progress")
 CLI.NUM(spec, "gens", "", "generations / iterations to run (headless)", 30)
 CLI.OPT(spec, "shot", "", "save a screenshot to this path after --shot-gen generations, then exit", "")
 CLI.NUM(spec, "shot-gen", "", "generation for --shot", 5)
-CLI.OPT(spec, "record", "", "save a GIF of the window to this path, then exit", "")
+CLI.OPT(spec, "record", "", "save a PNG frame sequence of the window into this directory, then exit", "")
 CLI.NUM(spec, "record-from", "", "generation/iteration at which recording starts", 1)
 CLI.NUM(spec, "record-frames", "", "frames to record", 70)
 CLI.NUM(spec, "record-stride", "", "simulation ticks per recorded frame", 3)
@@ -41,12 +62,143 @@ IF trackname$ <> "easy" AND trackname$ <> "hard" THEN
     END 2
 ENDIF
 
+DIM tr AS MAP = TRACK.NEW(trackname$)
+
 IF headless = 0 THEN
-    PRINT "GUI not implemented yet (use --headless)"
+    DIM gui AS MAP = GUI.NEW(tr, cars)
+    DIM shot$ = got{"shot"}
+    DIM shotgen AS INTEGER = CINT(got{"shot-gen"})
+    DIM rec$ = got{"record"}
+    DIM recfrom AS INTEGER = CINT(got{"record-from"})
+    DIM recframes AS INTEGER = CINT(got{"record-frames"})
+    DIM recstride AS INTEGER = CINT(got{"record-stride"})
+    DIM trainers AS MAP
+    DIM mode2$ = mode$
+    trainers{mode$} = TRAINER.NEW(mode$, tr, cars, maxsteps, 0)
+    DIM tg AS MAP = trainers{mode$}
+    ON "KEYDOWN" CALL OnKey
+    ON "QUIT" CALL OnQuit
+    DIM levels AS ARRAY = [1, 2, 4, 8, 16, 32]
+    DIM speedi AS INTEGER = 1
+    DIM turbo AS INTEGER = 0
+    DIM flash$ = ""
+    DIM flasht AS DOUBLE = -10000
+    DIM running AS INTEGER = 1
+    DIM frames AS INTEGER = 0
+    DIM capturing AS INTEGER = 0
+    DIM key AS INTEGER = 0
+    DIM f0 AS DOUBLE = 0.0
+    DIM nsteps AS INTEGER = 0
+    DIM k AS INTEGER = 0
+    DIM drawit AS INTEGER = 1
+    DIM saved$ = ""
+    DIM sp$ = ""
+    DIM ge AS MAP
+    DIM stp AS ARRAY = [0]
+    DIM gen AS INTEGER = 0
+    MKDIR "saves"
+    IF rec$ <> "" THEN MKDIR rec$
+    WHILE running = 1
+        f0 = TICK()
+        key = gKey
+        gKey = 0
+        IF gQuit = 1 THEN key = 27
+        IF key = 27 THEN
+            running = 0
+        ELSEIF key >= 49 AND key <= 52 THEN
+            mode2$ = MODE_OF$(key - 49)
+            IF MAP.EXISTS(trainers, mode2$) = 0 THEN trainers{mode2$} = TRAINER.NEW(mode2$, tr, cars, maxsteps, 0)
+            mode$ = mode2$
+            tg = trainers{mode$}
+            flash$ = "switched to " + tg{"name"}
+            flasht = f0
+        ELSEIF key = 43 OR key = 61 OR key = 1073741911 THEN
+            IF speedi < 5 THEN speedi = speedi + 1
+        ELSEIF key = 45 OR key = 1073741910 THEN
+            IF speedi > 0 THEN speedi = speedi - 1
+        ELSEIF key = 102 THEN
+            turbo = 1 - turbo
+        ELSEIF key = 115 THEN
+            sp$ = "saves/" + mode$ + ".json"
+            TXTWRITER sp$, TRAINER.SAVE_JSON$(tg)
+            flash$ = "saved " + sp$
+            flasht = f0
+        ELSEIF key = 108 THEN
+            sp$ = "saves/" + mode$ + ".json"
+            IF FILE.EXISTS(sp$) THEN
+                saved$ = TXTREADER$(sp$)
+                TRAINER.LOAD_JSON(tg, saved$)
+                flash$ = "loaded saved brain"
+            ELSE
+                flash$ = "nothing saved yet (press S)"
+            ENDIF
+            flasht = f0
+        ELSEIF key = 114 THEN
+            trainers{mode$} = TRAINER.NEW(mode$, tr, cars, maxsteps, 0)
+            tg = trainers{mode$}
+            flash$ = "restarted"
+            flasht = f0
+        ENDIF
+
+        ' ---- simulate
+        ge = tg{"env"}
+        gen = tg{"generation"}
+        capturing = 0
+        IF rec$ <> "" AND gen >= recfrom THEN capturing = 1
+        drawit = 1
+        IF rec$ <> "" AND capturing = 0 THEN
+            drawit = 0                              ' train quickly (no waiting) until the capture window
+            WHILE TICK() - f0 < 30
+                TRAINER.ADVANCE(tg)
+            WEND
+        ELSEIF capturing = 1 THEN
+            FOR k = 1 TO recstride
+                TRAINER.ADVANCE(tg)
+            NEXT k
+        ELSEIF shot$ <> "" AND gen <= shotgen THEN
+            drawit = 0
+            WHILE TICK() - f0 < 30
+                TRAINER.ADVANCE(tg)
+            WEND
+        ELSEIF turbo = 1 THEN
+            WHILE TICK() - f0 < 30
+                TRAINER.ADVANCE(tg)
+            WEND
+        ELSE
+            nsteps = CINT(levels[speedi])
+            FOR k = 1 TO nsteps
+                TRAINER.ADVANCE(tg)
+                IF TICK() - f0 > 50 THEN EXITFOR
+            NEXT k
+        ENDIF
+
+        IF drawit = 1 THEN
+            IF TICK() - flasht > 2500 THEN flash$ = ""
+            GUI.DRAW(gui, tg, CINT(levels[speedi]), turbo, flash$)
+            frames = frames + 1
+            IF capturing = 1 THEN
+                GFX.SAVE_SCREENSHOT(rec$ + "/frame_" + FORMAT$("{:04d}", frames) + ".png")
+                IF frames >= recframes THEN
+                    PRINT "saved "; frames; " frames to "; rec$
+                    running = 0
+                ENDIF
+            ENDIF
+            gen = tg{"generation"}
+            ge = tg{"env"}
+            stp = ge{"steps"}
+            IF shot$ <> "" AND gen > shotgen AND MAX(stp) > 220 THEN
+                GFX.SAVE_SCREENSHOT(shot$)
+                PRINT "screenshot saved: "; shot$
+                running = 0
+            ENDIF
+            SCREENFLIP
+            IF TICK() - f0 < 16 THEN GFX.DELAY(16 - (TICK() - f0))      ' clock.tick(60)
+        ENDIF
+    WEND
+    GFX.CLOSE
     END 0
 ENDIF
 
-DIM tr AS MAP = TRACK.NEW(trackname$)
 DIM t AS MAP = TRAINER.NEW(mode$, tr, cars, maxsteps, 0)
 DIM t0 AS DOUBLE = TICK()
 DIM seen AS INTEGER = 0

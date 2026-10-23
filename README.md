@@ -24,7 +24,7 @@ The port has three goals:
 | `rl_common.jdb`, `reinforce.jdb` | `rl_common.py`, `reinforce.py` | Shared rollout plumbing, REINFORCE on `torch.jdb` (tape in the interpreter, leak-free scalar loops under `-c`) | ✅ learns: mean passes half a lap at iteration 38 |
 | `ppo.jdb` | `ppo.py` | PPO: GAE, clipped objective, critic (tape in the interpreter, leak-free scalar loops under `-c`) | ✅ learns: mean passes half a lap at iteration 11, 5613 px mean after 50 |
 | `dqn.jdb` | `dqn.py` | DQN: replay buffer, target net, tape in the interpreter, scalar loops under `-c` | ✅ runs, gradients match; ~80 s/iteration, learning not yet measured |
-| `trainer.jdb`, `main.jdb` | `make_trainer`, `main.py` | Mode dispatch; headless mode with the same flags and log line (GUI: #25) | ✅ headless works interpreted and native, all four modes; GUI ⏳ |
+| `trainer.jdb`, `main.jdb` | `make_trainer`, `main.py` | Mode dispatch; headless mode and the 1400x700 GFX window (`gui.jdb`) with the same flags | ✅ headless + GUI work interpreted and native, all four modes; `--shot` / `--record` (PNG frames) |
 | `lib/gif.jdb`, `record.jdb` | (new) | Animated-GIF writer (GIF89a, LZW, quantiser; upstream candidate) and the recorder that films real training runs | ✅ the four GIFs above |
 | `plot_curves.jdb`, `bench.jdb` | `plot_curves.py`, `accel.py` | Learning-curve chart (SVG), timings interpreted vs native | ⏳ |
 
@@ -81,7 +81,9 @@ jdBasic tests/evo_smoke.jdb 3          # 3 generations of neuroevolution, prints
 jdBasic -c tests/evo_smoke.jdb         # compile to tests/evo_smoke.exe
 ```
 
-The planned entry point mirrors the Python one: `jdBasic main.jdb --mode ppo --track hard --headless --gens 40` (headless works today).
+The planned entry point mirrors the Python one: `jdBasic main.jdb --mode ppo --track hard --headless --gens 40` (headless and the GUI window work; `--shot assets/shot.png` writes the screenshot below).
+
+![GUI screenshot](assets/shot.png)
 
 ## Tests
 

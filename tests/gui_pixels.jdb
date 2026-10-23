@@ -1,0 +1,35 @@
+' GUI.TRACK_PIXELS (the pre-rendered road of the window, no window needed): counts per colour -> tests/out/gui_jd.txt
+' tests/gui_pixels.py compares them with main.py's numpy pre-render.
+IMPORT TRACK, GUI
+
+MKDIR "tests/out"
+TXTWRITER "tests/out/gui_jd.txt", ""
+DIM names AS ARRAY = ["easy", "hard"]
+DIM k AS INTEGER = 0
+DIM i AS INTEGER = 0
+DIM nbg AS INTEGER = 0
+DIM nroad AS INTEGER = 0
+DIM nedge AS INTEGER = 0
+DIM nstart AS INTEGER = 0
+DIM r AS INTEGER = 0
+DIM g AS INTEGER = 0
+DIM b AS INTEGER = 0
+FOR k = 0 TO 1
+    DIM tr AS MAP = TRACK.NEW(names[k])
+    DIM px AS ARRAY = GUI.TRACK_PIXELS(tr)
+    nbg = 0
+    nroad = 0
+    nedge = 0
+    nstart = 0
+    FOR i = 0 TO TRACK.WORLD_W * TRACK.WORLD_H - 1
+        r = CINT(px[i * 3])
+        g = CINT(px[i * 3 + 1])
+        b = CINT(px[i * 3 + 2])
+        IF r = 30 AND g = 33 AND b = 40 THEN nbg = nbg + 1
+        IF r = 62 AND g = 67 AND b = 78 THEN nroad = nroad + 1
+        IF r = 235 AND g = 235 AND b = 240 THEN nedge = nedge + 1
+        IF r = 250 AND g = 250 AND b = 90 THEN nstart = nstart + 1
+    NEXT i
+    TXTWRITER "tests/out/gui_jd.txt", names[k] + " " + STR$(nbg) + " " + STR$(nroad) + " " + STR$(nedge) + " " + STR$(nstart) + CHR$(10), TRUE
+    PRINT names[k]; " bg "; nbg; " road "; nroad; " edge "; nedge; " start "; nstart
+NEXT k

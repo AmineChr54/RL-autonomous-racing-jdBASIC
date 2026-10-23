@@ -80,7 +80,7 @@ Like REINFORCE, the compiled path runs forward, target forward, gradients, clip,
 ## trainer.jdb + main.jdb (issue #24)
 `trainer.jdb` = `make_trainer` (NEW/ADVANCE/LEADER/ACTS/SAVE_JSON$/LOAD_JSON, IF dispatch on `t{"mode"}`). `main.jdb` parses flags with `lib/cli.jdb`
 (`--mode --cars --track --max-steps --headless --gens --shot --shot-gen --record --record-from --record-frames --record-stride`; `--device` accepted and ignored).
-Headless prints Python's line via `RL_COMMON.HEADLINE$`. Without `--headless` it prints "GUI not implemented yet" (#25); `--shot`/`--record` are parsed only.
+Headless prints Python's line via `RL_COMMON.HEADLINE$`. Without `--headless` it opens the GUI (see below).
 `tools/jd.sh native main.jdb --headless --mode evolution --gens 3`: 5.6-6.0 s/generation, peak 83 MB. REINFORCE 5.4 s/iteration, peak 82 MB. Test: `tests/main_smoke.sh [native]`.
 
 ## CI (issue #43)
@@ -92,5 +92,16 @@ Observed: `UNIQUE` is quadratic in the number of distinct values (8 s for 6k val
 
 ## Work tracking
 Everything open is a GitHub issue: https://github.com/AmineChr54/RL-autonomous-racing-jdBASIC/issues
-(#25 GUI, #26 plot_curves, #27 bench, #28 PyTorch cross-check, #29 COMPARISON.md).
+(#26 plot_curves, #27 bench, #28 PyTorch cross-check, #29 COMPARISON.md).
 Done work and the jdBasic bugs above are closed issues #1-#18.
+
+## GUI (gui.jdb + main.jdb, issue #25)
+1400x700 window, layout/colours/fonts (Consolas 16/13/22 bold) copied from main.py run_gui. Road pre-rendered once (`GUI.TRACK_PIXELS` -> `IMG.WRITEPNG` ->
+`cache/track_<name>.png`), then `GFX.LOADIMAGE`/`DRAWIMAGE` per frame. Cars are filled quads = 8 parallel lines each, the swarm in ONE `LINE` matrix call with a
+colour row per line (matrices preallocated, refilled by element: no leak). Leader rays + circle, panel, best/mean curve with lap lines, brain visualiser, flash text.
+Keys (`ON "KEYDOWN"`, keycodes): 1-4 mode, +/- speed, F turbo, S/L save/load `saves/<mode>.json`, R restart, Esc/close quit (G, B not applicable).
+`--shot path.png --shot-gen N` (draws only after generation N, saves when a car has run 220 ticks) and `--record DIR` (`frame_NNNN.png`, `--record-from/-frames/-stride`).
+Works interpreted and `-c`. Screenshot (evolution, gen 13): `assets/shot.png`; `tools/jd.sh native main.jdb --shot assets/shot.png --shot-gen 12` takes about 1 min.
+Test without a window: `python tests/gui_pixels.py [--native]` (pre-rendered road vs numpy, exact up to the start line); the GUI itself is not in CI (needs a display).
+GFX notes: `LINE matrix, colours` needs an Nx3 colour matrix (inline r,g,b are ignored in the matrix form); `EXIT SUB` is a parse error (use RETURN); identifiers are
+case-insensitive, `W` and `w` collided in a loop; no hidden-window mode, so `--shot` / `--record` still open a window; no resize, so frames are 1400x700.
