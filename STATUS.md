@@ -59,8 +59,18 @@ arrays (`RL_COMMON.LOOP_NEW/LOOP_FWD/LOOP_BWD`); the interpreter uses the tape. 
 gradients (max diff 7e-17, both backends). The vector `MATMUL` is also slow under -c (about 40 MFlop/s; `hTh` of 25600x32 takes 1.8 s).
 The tape update alone leaks about 250 MB per iteration natively (1 GB cap after 3 iterations).
 
+## PPO (ppo.jdb)
+`tools/jd.sh native tests/ppo_smoke.jdb 50`: about 34 s/iteration (200 cars, 128 ticks, then 4 epochs x 13 minibatches of 2048), peak 39 MB after 5 iterations,
+84 MB after 50 (a creep of about 1 MB/iteration from small string temporaries such as `"gw" + STR$(l)` map keys, not the array leak of bug 9).
+Mean distance passes half a lap (1593 px) at iteration 11; iteration 50: best 5667 px (1.78 laps), mean 5613 px (Python: ~5664 / 5699 after 60).
+Interpreted: about 42 s/iteration. Same two paths as REINFORCE: tape (`GradsTape`) in the interpreter, scalar loops (`GradsLoop`, `LoopStep` = grad clip 0.5 over all
+params + Adam, in place, no arrays) under -c. `tests/ppo_grad.jdb`: loss, gradients (clipped + tie samples), grad norm and the clip + Adam step agree to 3e-16 in both backends.
+Under -c about 80% of the time is the 52 minibatch updates: compiled scalar loops run ~30 M multiply-adds/s (about 10 ns per array access, whatever the indexing or unrolling).
+`RL_COMMON` additions: `LOOP_GRADS` (flat gradients, no PUTGRAD), `PERMUTE` (Fisher-Yates; `GRADE(RNG.FILL)` allocates n-sized temporaries).
+Note: the builtin `STDEV` (used by `RL_COMMON.NORMALIZE_COL`) is the population std per the library audit, not unbiased as its comment says (relative diff 1/(2n), harmless at n = 25600); PPO computes the unbiased std itself.
+
 ## Work tracking
 Everything open is a GitHub issue: https://github.com/AmineChr54/RL-autonomous-racing-jdBASIC/issues
-(#19 local CI, #22 DQN, #23 PPO, #24 trainer + headless main,
+(#19 local CI, #22 DQN, #24 trainer + headless main,
 #25 GUI, #26 plot_curves, #27 bench, #28 PyTorch cross-check, #29 COMPARISON.md).
 Done work and the jdBasic bugs above are closed issues #1-#18.
