@@ -35,6 +35,7 @@ An uncapped native test once took 14.5 GB of RAM.
 7. In a module, a Map value read into an untyped local never matches a `SWITCH CASE` (`IF` works).
 8. `ONES([m{"r"}, m{"c"}])`, a shape built from Map values, crashes.
 9. Every whole-array temporary (`MATMUL`, `a * b`, `TANH(a)`, `RESHAPE`, `DIM x AS ARRAY = expr` in a loop, even re-assignment `x = a * a`) is never freed: 200 x 100 doubles per op x 200 iterations = +160 MB. Scalar element loops over preallocated arrays (as `env.jdb`) do not leak. Repro: loop `DIM a AS ARRAY = x * x` with a 1000x100 `x`. Workaround: `BRAIN.FORWARD` and `NextGeneration` use scalar loops writing into buffers made once per generation. Whole-array math is fine only for one-off (per generation or per program) work.
+   Still present on upstream main 70c1b7b0 (Oct 23, includes the refcount rework 8a2a245b), measured on the Linux build: same 175 MB peak for 200 x `x * x`, `MATMUL`, `TANH`, `RESHAPE`, 512 MB for `TANH(MATMUL(x, w)) + x`; `JDB_RC_OFF=1` changes nothing (#35).
 - Interpreter: `IIF` on 2D arrays is broken. Library: `RAND.DRAWS(gen,"normal",n)` returns zeros (σ defaults to 0).
 
 ## Library audit (issue #31, `docs/LIBRARY_AUDIT.md`)
@@ -75,6 +76,9 @@ peak 129 MB, same numbers (3 iterations: best 424/384/504 px, loss 0.229/0.157/0
 Like REINFORCE, the compiled path runs forward, target forward, gradients, clip, Adam and polyak as scalar loops over flat arrays (no array temporaries); the interpreter uses the tape.
 `tests/dqn_grad.jdb` checks both give the same loss and gradients (max diff 1.4e-17, both backends). The replay buffer is flat 1-D arrays (150000 transitions).
 `TORCH.LOAD_JSON` is broken under -c (#45), so `tests/dqn_smoke.jdb` only reloads the saved brain when interpreted.
+
+## CI (issue #43)
+The runner image builds jdBasic from upstream source on Linux (g++, LLVM 18, no Wine; pinned commit, see `ci/README.md`). The `jdbasic` job runs torch_gradcheck, track_check, reinforce_grad (interpreter and `-c`), env_parity and brain_parity (both backends); results equal the Windows build (parity diffs 2.2e-16, gradcheck 20/20). The old Wine job is gone.
 
 ## Work tracking
 Everything open is a GitHub issue: https://github.com/AmineChr54/RL-autonomous-racing-jdBASIC/issues
