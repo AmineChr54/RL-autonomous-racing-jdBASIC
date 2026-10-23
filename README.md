@@ -25,7 +25,21 @@ The port has three goals:
 | `ppo.jdb` | `ppo.py` | PPO: GAE, clipped objective, critic (tape in the interpreter, leak-free scalar loops under `-c`) | ✅ learns: mean passes half a lap at iteration 11, 5613 px mean after 50 |
 | `dqn.jdb` | `dqn.py` | DQN: replay buffer, target net, tape in the interpreter, scalar loops under `-c` | ✅ runs, gradients match; ~80 s/iteration, learning not yet measured |
 | `trainer.jdb`, `main.jdb` | `make_trainer`, `main.py` | Mode dispatch; headless mode with the same flags and log line (GUI: #25) | ✅ headless works interpreted and native, all four modes; GUI ⏳ |
+| `lib/gif.jdb`, `record.jdb` | (new) | Animated-GIF writer (GIF89a, LZW, quantiser; upstream candidate) and the recorder that films real training runs | ✅ the four GIFs above |
 | `plot_curves.jdb`, `bench.jdb` | `plot_curves.py`, `accel.py` | Learning-curve chart (SVG), timings interpreted vs native | ⏳ |
+
+## The engine live
+
+Recorded from real training runs by `record.jdb` (jdBasic, compiled with `-c`, 80-120 cars on the hard track, seed 0). Yellow = cars, green = the current leader with its 7 rays (red), the strip underneath is best (green) and mean (blue) distance travelled per iteration so far, the number is the iteration being filmed. Each GIF is a few iterations of one run: early ones first, the last one at the end.
+
+| | |
+|---|---|
+| ![evolution](docs/gifs/evolution.gif) | ![REINFORCE](docs/gifs/reinforce.gif) |
+| Neuroevolution, 120 cars: generations 1, 5, 10 and 20 of one run, a frame every 15 ticks. | REINFORCE, 80 cars: iterations 1, 10, 20 and 30, a frame every 4 ticks (128 ticks per iteration). |
+| ![PPO](docs/gifs/ppo.gif) | ![DQN](docs/gifs/dqn.gif) |
+| PPO, 80 cars: iterations 1, 6 and 12, a frame every 4 ticks. | DQN, 80 cars: iterations 1, 4 and 8, a frame every 4 ticks (only 8 iterations at about 75 s each, so it has barely started to learn; see #46). |
+
+Reproduce one: `JD_MEM=1500 tools/jd.sh native record.jdb reinforce 30 1,10,20,last 80 4` writes `docs/gifs/reinforce.gif` (about 80 s). The GIFs are written by `lib/gif.jdb` (`GIF.WRITE(path$, frames, delay_ms)`: GIF89a, LZW, palette quantiser; selftest `tools/jd.sh run|native tests/gif_selftest.jdb`).
 
 ## How it works
 
@@ -77,6 +91,7 @@ The planned entry point mirrors the Python one: `jdBasic main.jdb --mode ppo --t
 | `python tests/env_parity.py [--native]` | jdBasic env against the Python `SwarmEnv`, 20 cars × 300 ticks |
 | `python tests/brain_parity.py [--native]` | per-car brains against `brain.forward_numpy` |
 | `tools/jd.sh run\|native tests/torch_gradcheck.jdb` | all 20 autograd ops against central finite differences |
+| `tools/jd.sh run\|native tests/gif_selftest.jdb` | `lib/gif.jdb`: LZW round trip (incl. table reset), quantiser, file write |
 
 The Python tests import the original project from `D:\Projects\RL-autonomous-racing`, or from `$PY_PROJECT`.
 

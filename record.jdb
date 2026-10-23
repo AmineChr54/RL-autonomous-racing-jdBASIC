@@ -1,0 +1,301 @@
+' record.jdb - trains one algorithm for real and records GIFs of the cars (track, cars, leader + its rays,
+' learning-curve strip) at a few chosen iterations, so the learning is visible.
+'
+'   tools/jd.sh native record.jdb <algo> <iters> <snapshots> [cars] [stride] [out.gif]
+'     algo       evolution | reinforce | ppo | dqn
+'     iters      total training iterations (generations)
+'     snapshots  comma list of iterations to film, e.g. 1,6,12 ("last" = iters)
+'     cars       swarm size (default 80); stride = ticks between frames (default 6)
+'   e.g. JD_MEM=1500 tools/jd.sh native record.jdb evolution 12 1,6,last 80 12 docs/gifs/evolution.gif
+'
+' Frames are drawn straight into palette indices (250 x 215, the 1000 x 700 world at 1/4 plus a 40 px
+' curve strip) and written with GIF.WRITEINDEXED.
+IMPORT TRACK, ENV, EVOLUTION, REINFORCE, PPO, DQN, GIF
+
+CONST SC = 4
+CONST FW = 250                  ' TRACK.WORLD_W / SC
+CONST MH = 175                  ' TRACK.WORLD_H / SC
+CONST STRIP = 40
+CONST FH = 215                  ' MH + STRIP
+' palette indices
+CONST C_BG = 0
+CONST C_ROAD = 1
+CONST C_CAR = 2
+CONST C_LEAD = 3
+CONST C_RAY = 4
+CONST C_DEAD = 5
+CONST C_BEST = 6
+CONST C_MEAN = 7
+CONST C_STRIP = 8
+CONST C_TXT = 9
+CONST C_START = 10
+CONST C_MID = 11
+
+FUNC Palette() AS ARRAY
+    RETURN [18, 18, 26,  58, 62, 74,  245, 200, 60,  70, 235, 130,  235, 70, 70,  110, 64, 64, _
+            70, 235, 130,  120, 175, 255,  30, 30, 40,  240, 240, 240,  255, 255, 255,  74, 78, 92]
+ENDFUNC
+
+FUNC Glyph$(d AS INTEGER)
+    DIM g$ = ["111101101101111", "010110010010111", "111001111100111", "111001111001111", "101101111001001", _
+              "111100111001111", "111100111101111", "111001001001001", "111101111101111", "111101111001111"]
+    RETURN g$[d]
+ENDFUNC
+
+' The static picture: road, centerline, start line, strip background.
+FUNC Background(tr AS MAP) AS ARRAY
+    DIM mask AS ARRAY = tr{"mask"}
+    DIM bg AS ARRAY = ZEROS([FW * FH])
+    DIM W AS INTEGER = TRACK.WORLD_W
+    DIM x AS INTEGER = 0
+    DIM y AS INTEGER = 0
+    DIM s AS INTEGER = 0
+    DIM b AS INTEGER = 0
+    FOR y = 0 TO MH - 1
+        FOR x = 0 TO FW - 1
+            b = CINT(y * SC)
+            s = CINT(mask[(b + 1) * W + x * SC + 1] + mask[(b + 1) * W + x * SC + 3] + mask[(b + 3) * W + x * SC + 1] + mask[(b + 3) * W + x * SC + 3])
+            IF s >= 2 THEN bg[y * FW + x] = C_ROAD
+        NEXT x
+    NEXT y
+    DIM cx AS ARRAY = tr{"cx"}
+    DIM cy AS ARRAY = tr{"cy"}
+    DIM n AS INTEGER = tr{"n"}
+    DIM i AS INTEGER = 0
+    DIM px AS INTEGER = 0
+    DIM py AS INTEGER = 0
+    FOR i = 0 TO n - 1 STEP 3
+        px = CINT(cx[i] / SC)
+        py = CINT(cy[i] / SC)
+        IF px >= 0 AND px < FW AND py >= 0 AND py < MH THEN bg[py * FW + px] = C_MID
+    NEXT i
+    ' start line, across the road at centerline point 0
+    DIM hd AS ARRAY = tr{"heading"}
+    DIM nx AS DOUBLE = -SIN(hd[0])
+    DIM ny AS DOUBLE = COS(hd[0])
+    DIM k AS INTEGER = 0
+    DIM hw AS DOUBLE = tr{"width"} / 2.0 / SC
+    FOR k = -CINT(hw) TO CINT(hw)
+        px = CINT(cx[0] / SC + nx * k)
+        py = CINT(cy[0] / SC + ny * k)
+        IF px >= 0 AND px < FW AND py >= 0 AND py < MH THEN bg[py * FW + px] = C_START
+    NEXT k
+    FOR y = MH TO FH - 1
+        FOR x = 0 TO FW - 1
+            bg[y * FW + x] = C_STRIP
+        NEXT x
+    NEXT y
+    RETURN bg
+ENDFUNC
+
+FUNC Put(fr AS ARRAY, x AS INTEGER, y AS INTEGER, c AS INTEGER) AS ARRAY
+    IF x >= 0 AND x < FW AND y >= 0 AND y < FH THEN fr[y * FW + x] = c
+    RETURN fr
+ENDFUNC
+
+FUNC DrawNumber(fr AS ARRAY, v AS INTEGER, x0 AS INTEGER, y0 AS INTEGER) AS ARRAY
+    DIM s$ = TRIM$(STR$(v))
+    DIM i AS INTEGER = 0
+    DIM d AS INTEGER = 0
+    DIM r AS INTEGER = 0
+    DIM c AS INTEGER = 0
+    DIM g$ = ""
+    FOR i = 1 TO LEN(s$)
+        d = CINT(VAL(MID$(s$, i - 1, 1)))
+        g$ = Glyph$(d)
+        FOR r = 0 TO 4
+            FOR c = 0 TO 2
+                IF MID$(g$, r * 3 + c, 1) = "1" THEN
+                    fr = Put(fr, x0 + c * 2, y0 + r * 2, C_TXT)
+                    fr = Put(fr, x0 + c * 2 + 1, y0 + r * 2, C_TXT)
+                    fr = Put(fr, x0 + c * 2, y0 + r * 2 + 1, C_TXT)
+                    fr = Put(fr, x0 + c * 2 + 1, y0 + r * 2 + 1, C_TXT)
+                ENDIF
+            NEXT c
+        NEXT r
+        x0 = x0 + 8
+    NEXT i
+    RETURN fr
+ENDFUNC
+
+' one polyline of the curve strip: hist values (px travelled) against iterations 1..total
+FUNC DrawCurve(fr AS ARRAY, hist AS ARRAY, total AS INTEGER, ymax AS DOUBLE, col AS INTEGER) AS ARRAY
+    DIM n AS INTEGER = LEN(hist)
+    DIM i AS INTEGER = 0
+    DIM x AS INTEGER = 0
+    DIM y AS INTEGER = 0
+    DIM px AS INTEGER = -1
+    DIM py AS INTEGER = -1
+    DIM yy AS INTEGER = 0
+    DIM lo AS INTEGER = 0
+    DIM hi AS INTEGER = 0
+    FOR i = 0 TO n - 1
+        x = 3 + CINT((FW - 7) * i / MAX([total - 1, 1]))
+        y = MH + STRIP - 4 - CINT((STRIP - 9) * hist[i] / ymax)
+        IF px >= 0 THEN
+            lo = y
+            hi = py
+            IF py < y THEN
+                lo = py
+                hi = y
+            ENDIF
+            FOR yy = lo TO hi
+                fr = Put(fr, (x + px) / 2, yy, col)
+            NEXT yy
+        ENDIF
+        fr = Put(fr, x, y, col)
+        fr = Put(fr, x + 1, y, col)
+        fr = Put(fr, x, y - 1, col)
+        fr = Put(fr, x + 1, y - 1, col)
+        px = x
+        py = y
+    NEXT i
+    RETURN fr
+ENDFUNC
+
+FUNC Render(bg AS ARRAY, e AS MAP, lead AS INTEGER, hb AS ARRAY, hm AS ARRAY, iter AS INTEGER, total AS INTEGER) AS ARRAY
+    DIM fr AS ARRAY = bg + 0
+    DIM xs AS ARRAY = e{"x"}
+    DIM ys AS ARRAY = e{"y"}
+    DIM th AS ARRAY = e{"th"}
+    DIM al AS ARRAY = e{"alive"}
+    DIM dist AS ARRAY = e{"dist"}
+    DIM ra AS ARRAY = e{"ray_angles"}
+    DIM n AS INTEGER = e{"n"}
+    DIM i AS INTEGER = 0
+    DIM px AS INTEGER = 0
+    DIM py AS INTEGER = 0
+    DIM r AS INTEGER = 0
+    DIM s AS INTEGER = 0
+    DIM a AS DOUBLE = 0.0
+    DIM d AS DOUBLE = 0.0
+    FOR i = 0 TO n - 1
+        IF i <> lead THEN
+            px = CINT(xs[i] / SC)
+            py = CINT(ys[i] / SC)
+            IF al[i] > 0 THEN
+                fr = Put(fr, px, py, C_CAR)
+                fr = Put(fr, px + 1, py, C_CAR)
+                fr = Put(fr, px, py + 1, C_CAR)
+                fr = Put(fr, px + 1, py + 1, C_CAR)
+            ELSE
+                fr = Put(fr, px, py, C_DEAD)
+            ENDIF
+        ENDIF
+    NEXT i
+    IF lead >= 0 THEN
+        ' the leader's 7 rays (dist is the wall distance along each ray)
+        FOR r = 0 TO ENV.N_RAYS - 1
+            a = th[lead] + ra[r]
+            d = dist[lead * ENV.N_RAYS + r]
+            FOR s = 1 TO CINT(d / SC)
+                fr = Put(fr, CINT((xs[lead] + COS(a) * s * SC) / SC), CINT((ys[lead] + SIN(a) * s * SC) / SC), C_RAY)
+            NEXT s
+        NEXT r
+        px = CINT(xs[lead] / SC)
+        py = CINT(ys[lead] / SC)
+        FOR r = -1 TO 1
+            FOR s = -1 TO 1
+                fr = Put(fr, px + s, py + r, C_LEAD)
+            NEXT s
+        NEXT r
+    ENDIF
+    ' learning curve: best and mean px travelled per iteration so far
+    DIM ymax AS DOUBLE = 1.0
+    FOR i = 0 TO LEN(hb) - 1
+        IF hb[i] > ymax THEN ymax = hb[i]
+    NEXT i
+    IF LEN(hb) > 0 THEN
+        fr = DrawCurve(fr, hm, total, ymax, C_MEAN)
+        fr = DrawCurve(fr, hb, total, ymax, C_BEST)
+    ENDIF
+    fr = DrawNumber(fr, iter, 4, 4)
+    RETURN fr
+ENDFUNC
+
+FUNC Contains(list AS ARRAY, v AS INTEGER) AS INTEGER
+    DIM i AS INTEGER = 0
+    FOR i = 0 TO LEN(list) - 1
+        IF CINT(list[i]) = v THEN RETURN 1
+    NEXT i
+    RETURN 0
+ENDFUNC
+
+FUNC NewTrainer(algo$, e AS MAP) AS MAP
+    IF algo$ = "evolution" THEN RETURN EVOLUTION.NEW(e, 0)
+    IF algo$ = "reinforce" THEN RETURN REINFORCE.NEW(e, 0)
+    IF algo$ = "ppo" THEN RETURN PPO.NEW(e, 0)
+    RETURN DQN.NEW(e, 0)
+ENDFUNC
+
+FUNC Advance(algo$, t AS MAP) AS INTEGER
+    IF algo$ = "evolution" THEN RETURN EVOLUTION.ADVANCE(t)
+    IF algo$ = "reinforce" THEN RETURN REINFORCE.ADVANCE(t)
+    IF algo$ = "ppo" THEN RETURN PPO.ADVANCE(t)
+    RETURN DQN.ADVANCE(t)
+ENDFUNC
+
+FUNC Leader(algo$, t AS MAP) AS INTEGER
+    IF algo$ = "evolution" THEN RETURN EVOLUTION.LEADER(t)
+    IF algo$ = "reinforce" THEN RETURN REINFORCE.LEADER(t)
+    IF algo$ = "ppo" THEN RETURN PPO.LEADER(t)
+    RETURN DQN.LEADER(t)
+ENDFUNC
+
+DIM args AS ARRAY = OS.ARGS()
+DIM algo$ = LCASE$(args[1])
+DIM iters AS INTEGER = CINT(VAL(args[2]))
+DIM snaps AS ARRAY = []
+DIM parts AS ARRAY = SPLIT(args[3], ",")
+DIM i AS INTEGER = 0
+DIM pt$ = ""
+FOR i = 0 TO LEN(parts) - 1
+    pt$ = parts[i]
+    IF pt$ = "last" THEN
+        PUSH(snaps, iters)
+    ELSE
+        PUSH(snaps, CINT(VAL(pt$)))
+    ENDIF
+NEXT i
+DIM ncars AS INTEGER = 80
+IF LEN(args) > 4 THEN ncars = CINT(VAL(args[4]))
+DIM stride AS INTEGER = 6
+IF LEN(args) > 5 THEN stride = CINT(VAL(args[5]))
+DIM outp$ = "docs/gifs/" + algo$ + ".gif"
+IF LEN(args) > 6 THEN outp$ = args[6]
+
+DIM t0 AS DOUBLE = TICK()
+DIM tr AS MAP = TRACK.NEW("hard")
+DIM e AS MAP = ENV.NEW(tr, ncars, 900, 0)
+DIM t AS MAP = NewTrainer(algo$, e)
+DIM bg AS ARRAY = Background(tr)
+DIM frames AS ARRAY = []
+DIM hb AS ARRAY = []
+DIM hm AS ARRAY = []
+DIM tick AS INTEGER = 0
+DIM gen AS INTEGER = 1
+DIM lead AS INTEGER = 0
+DIM fr AS ARRAY = []
+DIM ended AS INTEGER = 0
+PRINT algo$; ": "; iters; " iterations, "; ncars; " cars, filming "; args[3]; " every "; stride; " ticks"
+WHILE t{"generation"} <= iters
+    gen = t{"generation"}
+    IF Contains(snaps, gen) = 1 AND tick MOD stride = 0 THEN
+        hb = t{"hist_best"}
+        hm = t{"hist_mean"}
+        lead = Leader(algo$, t)
+        fr = Render(bg, e, lead, hb, hm, gen, iters)
+        PUSH(frames, fr)
+    ENDIF
+    ended = Advance(algo$, t)
+    tick = tick + 1
+    IF ended = 1 THEN
+        tick = 0
+        hb = t{"hist_best"}
+        PRINT "iteration "; gen; " done, best "; INT(hb[LEN(hb) - 1]); " px, "; LEN(frames); " frames, "; INT((TICK() - t0) / 1000); " s"
+    ENDIF
+WEND
+PRINT "trained in "; INT((TICK() - t0) / 1000); " s, "; LEN(frames); " frames"
+DIM t1 AS DOUBLE = TICK()
+DIM nbytes AS INTEGER = GIF.WRITEINDEXED(outp$, FW, FH, Palette(), frames, 80)
+PRINT "wrote "; outp$; " "; nbytes; " bytes in "; INT(TICK() - t1); " ms"
