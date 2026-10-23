@@ -85,6 +85,10 @@ Headless prints Python's line via `RL_COMMON.HEADLINE$`. Without `--headless` it
 
 ## CI (issue #43)
 The runner image builds jdBasic from upstream source on Linux (g++, LLVM 18, no Wine; pinned commit, see `ci/README.md`). The `jdbasic` job runs torch_gradcheck, track_check, reinforce_grad (interpreter and `-c`), env_parity and brain_parity (both backends); results equal the Windows build (parity diffs 2.2e-16, gradcheck 20/20). The old Wine job is gone.
+## README GIFs (issue #49: `lib/gif.jdb`, `record.jdb`)
+`lib/gif.jdb`: GIF89a writer (`GIF.WRITE(path$, frames, delay_ms)` for IMG-style frames, `GIF.WRITEINDEXED` for palette-index frames) plus `GIF.DECODE/READ` for tests. LZW uses a flat-array trie (no map lookups), global palette (exact if <= 256 colors, else a 6x7x6 cube), NETSCAPE loop. `tests/gif_selftest.jdb` (TESTKIT, 17 checks) passes interpreted and -c; the output also decodes in Pillow. The IMPORT path: `tools/jd.sh` sets `JDBASIC_PATH` to the repo's `lib/`.
+`record.jdb <algo> <iters> <snapshots> [cars] [stride] [out]` trains one algorithm and films chosen iterations (250x215 frames drawn as palette indices). Native, one GIF each: evolution 120 cars 20 gens 76 s, 240 frames, 529 KB, peak 83 MB (cap peak 499 MB incl. frames); REINFORCE 80 cars 30 iters 80 s, 128 frames, 301 KB; PPO 80 cars 12 iters 168 s, 96 frames, 216 KB; DQN 80 cars 8 iters 608 s, 96 frames, 211 KB. Interpreted GIF.ENCODE of 3k pixels takes ~50 ms; the record path was only run native.
+Observed: `UNIQUE` is quadratic in the number of distinct values (8 s for 6k values), so the quantiser sorts with `GRADE` instead. `MAX(a, b)` is not a two-value max (use `MAX([a, b])`).
 
 ## Work tracking
 Everything open is a GitHub issue: https://github.com/AmineChr54/RL-autonomous-racing-jdBASIC/issues

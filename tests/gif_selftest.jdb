@@ -1,0 +1,73 @@
+' GIF selftest: LZW round trip (incl. table overflow), palette quantiser, header, file write.
+'   tools/jd.sh run|native tests/gif_selftest.jdb
+IMPORT GIF, TESTKIT
+
+TESTKIT.SUITE("GIF indexed round trip")
+DIM w AS INTEGER = 64
+DIM h AS INTEGER = 48
+DIM npix AS INTEGER = w * h
+DIM pal AS ARRAY = [0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255]
+DIM fa AS ARRAY = ZEROS([npix])
+DIM fb AS ARRAY = ZEROS([npix])
+DIM i AS INTEGER = 0
+DIM seed AS INTEGER = 12345
+FOR i = 0 TO npix - 1
+    fa[i] = INT(i / w / 12) MOD 5                  ' flat stripes: compresses
+    seed = (seed * 1103 + 12345) MOD 65521
+    fb[i] = seed MOD 5                             ' noise: overflows the 4096-entry table
+NEXT i
+DIM g$ = GIF.ENCODEINDEXED$(w, h, pal, [fa, fb, fa], 100)
+TESTKIT.EQ(LEFT$(g$, 6), "GIF89a", "signature")
+TESTKIT.EQ(BYTEAT(g$, LEN(g$) - 1), 59, "trailer")
+DIM d AS MAP = GIF.DECODE(g$)
+TESTKIT.EQ(d{"width"}, w, "width")
+TESTKIT.EQ(d{"height"}, h, "height")
+TESTKIT.EQ(d{"delay"}, 100, "delay ms")
+DIM fr AS ARRAY = d{"frames"}
+TESTKIT.EQ(LEN(fr), 3, "frame count")
+DIM f0 AS ARRAY = fr[0]
+DIM f1 AS ARRAY = fr[1]
+DIM f2 AS ARRAY = fr[2]
+TESTKIT.EQ(SUM(ABS(f0 - fa)), 0, "stripes survive LZW")
+TESTKIT.EQ(SUM(ABS(f1 - fb)), 0, "noise survives LZW (table reset)")
+TESTKIT.EQ(SUM(ABS(f2 - fa)), 0, "third frame")
+TESTKIT.ISTRUE(LEN(g$) < 3 * npix, "flat frames compress")
+
+TESTKIT.SUITE("GIF quantiser")
+DIM px AS ARRAY = ZEROS([w * h * 3])
+FOR i = 0 TO npix - 1
+    px[i * 3] = 20 * (INT(i / w) MOD 4)
+    px[i * 3 + 1] = 200
+    px[i * 3 + 2] = 7
+NEXT i
+DIM img AS MAP = {"width": w, "height": h, "channels": 3, "pixels": px}
+DIM g2$ = GIF.ENCODE$([img, img], 40)
+DIM d2 AS MAP = GIF.DECODE(g2$)
+DIM p2 AS ARRAY = d2{"palette"}
+DIM fr2 AS ARRAY = d2{"frames"}
+DIM a0 AS ARRAY = fr2[0]
+TESTKIT.EQ(d2{"delay"}, 40, "delay 40 ms")
+TESTKIT.EQ(p2[a0[w * 13 + 3] * 3], 20, "exact palette keeps red of row 13")
+TESTKIT.EQ(p2[a0[w * 12 * 3] * 3 + 1], 200, "exact palette keeps green")
+' more than 256 colors falls back to the cube
+DIM px3 AS ARRAY = ZEROS([w * h * 3])
+FOR i = 0 TO npix - 1
+    px3[i * 3] = i MOD 256
+    px3[i * 3 + 1] = INT(i / 256) * 10
+    px3[i * 3 + 2] = (i * 7) MOD 256
+NEXT i
+DIM img3 AS MAP = {"width": w, "height": h, "channels": 3, "pixels": px3}
+DIM d3 AS MAP = GIF.DECODE(GIF.ENCODE$([img3], 10))
+DIM p3 AS ARRAY = d3{"palette"}
+TESTKIT.ISTRUE(LEN(p3) >= 252 * 3, "cube palette")
+DIM fr3 AS ARRAY = d3{"frames"}
+DIM b0 AS ARRAY = fr3[0]
+TESTKIT.NEAR(p3[b0[100] * 3], px3[300], 26, "cube red within a step")
+
+TESTKIT.SUITE("GIF file")
+DIM n AS INTEGER = GIF.WRITE("gif_selftest_out.gif", [img, img3], 50)
+DIM back AS MAP = GIF.READ("gif_selftest_out.gif")
+TESTKIT.EQ(LEN(BINREADER$("gif_selftest_out.gif")), n, "file size")
+TESTKIT.EQ(LEN(back{"frames"}), 2, "frames read back")
+KILL "gif_selftest_out.gif"
+PRINT TESTKIT.REPORT()

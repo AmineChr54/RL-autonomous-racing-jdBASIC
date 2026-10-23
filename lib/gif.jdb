@@ -1,0 +1,568 @@
+' GIF: animated GIF89a writer (and a small decoder for round-trip tests), no GFX needed.
+' LZW with a flat-array trie, global palette (exact when the frames use at most 256 colors, otherwise a
+' 6x7x6 color cube), infinite loop via the NETSCAPE2.0 extension. Same module shape as lib/img.jdb:
+' a frame is an IMG image map {"width", "height", "channels", "pixels"}.
+'
+'   IMPORT GIF
+'   GIF.WRITE("anim.gif", [frame0, frame1, frame2], 100)          ' 100 ms per frame
+'   ' fast path for renderers that already draw palette indices:
+'   GIF.WRITEINDEXED("anim.gif", w, h, palette_rgb, [idx0, idx1], 100)
+'   DIM g = GIF.READ("anim.gif")   ' {"width","height","palette","frames": [index arrays],"delay"}
+'
+' Written for jdBasic Build 102; interpreted and -c. Candidate for AtomiJD/jdBasic lib/.
+EXPORT MODULE GIF
+
+DIM gB64$ = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+' ---- byte plumbing ----
+
+' The first n values of a byte array as a binary string (base64 trick: no NUL characters in the middle).
+FUNC BytesText$(bytes AS ARRAY, n AS INTEGER)
+    IF n <= 0 THEN RETURN ""
+    DIM alpha AS ARRAY = ZEROS([64])
+    DIM i AS INTEGER = 0
+    FOR i = 0 TO 63
+        alpha[i] = ASC(MID$(gB64$, i, 1))
+    NEXT i
+    DIM groups AS INTEGER = INT((n + 2) / 3)
+    DIM codes AS ARRAY = ZEROS([groups * 4])
+    DIM at AS INTEGER = 0
+    DIM b0 AS INTEGER = 0
+    DIM b1 AS INTEGER = 0
+    DIM b2 AS INTEGER = 0
+    DIM v AS INTEGER = 0
+    DIM s0 AS INTEGER = 0
+    DIM s1 AS INTEGER = 0
+    DIM s2 AS INTEGER = 0
+    DIM rest AS INTEGER = 0
+    FOR i = 0 TO groups - 1
+        at = i * 3
+        b0 = CINT(bytes[at])
+        b1 = 0
+        b2 = 0
+        IF at + 1 < n THEN b1 = CINT(bytes[at + 1])
+        IF at + 2 < n THEN b2 = CINT(bytes[at + 2])
+        v = b0 * 65536 + b1 * 256 + b2
+        s0 = INT(v / 262144)
+        rest = v - s0 * 262144
+        s1 = INT(rest / 4096)
+        rest = rest - s1 * 4096
+        s2 = INT(rest / 64)
+        codes[i * 4] = alpha[s0]
+        codes[i * 4 + 1] = alpha[s1]
+        codes[i * 4 + 2] = alpha[s2]
+        codes[i * 4 + 3] = alpha[rest - s2 * 64]
+    NEXT i
+    DIM text$ = JOIN(CHR$(codes), "")
+    DIM decoded$ = CODEC.BASE64_DECODE$(text$)
+    RETURN LEFT$(decoded$, n)
+ENDFUNC
+
+FUNC Concat$(pieces AS ARRAY)
+    DIM work AS ARRAY = []
+    DIM i AS INTEGER = 0
+    FOR i = 0 TO LEN(pieces) - 1
+        DIM piece$ = pieces[i]
+        PUSH(work, piece$)
+    NEXT i
+    IF LEN(work) = 0 THEN RETURN ""
+    DIM rounds AS INTEGER = 0
+    FOR rounds = 0 TO 64
+        IF LEN(work) <= 1 THEN EXITFOR
+        DIM merged AS ARRAY = []
+        DIM k AS INTEGER = 0
+        FOR k = 0 TO LEN(work) - 1 STEP 2
+            DIM a_part$ = work[k]
+            IF k + 1 < LEN(work) THEN
+                DIM b_part$ = work[k + 1]
+                PUSH(merged, a_part$ + b_part$)
+            ELSE
+                PUSH(merged, a_part$)
+            ENDIF
+        NEXT k
+        work = merged
+    NEXT rounds
+    DIM whole$ = work[0]
+    RETURN whole$
+ENDFUNC
+
+' ---- quantiser ----
+
+' palette (flat RGB) and one index array per frame. Exact when <= 256 distinct colors.
+FUNC QuantizeFrames(frames AS ARRAY) AS MAP
+    DIM nf AS INTEGER = LEN(frames)
+    DIM f AS INTEGER = 0
+    DIM i AS INTEGER = 0
+    DIM fr AS MAP = frames[0]
+    DIM w AS INTEGER = CINT(fr{"width"})
+    DIM h AS INTEGER = CINT(fr{"height"})
+    DIM npix AS INTEGER = w * h
+    DIM ch AS INTEGER = CINT(fr{"channels"})
+    ' one key per pixel: r*65536 + g*256 + b
+    DIM keys AS ARRAY = ZEROS([npix * nf])
+    DIM px AS ARRAY = fr{"pixels"}
+    DIM r AS INTEGER = 0
+    DIM g AS INTEGER = 0
+    DIM b AS INTEGER = 0
+    FOR f = 0 TO nf - 1
+        fr = frames[f]
+        IF CINT(fr{"width"}) <> w OR CINT(fr{"height"}) <> h THEN THROW "GIF: all frames need the same size"
+        ch = CINT(fr{"channels"})
+        px = fr{"pixels"}
+        FOR i = 0 TO npix - 1
+            IF ch >= 3 THEN
+                r = CINT(px[i * ch])
+                g = CINT(px[i * ch + 1])
+                b = CINT(px[i * ch + 2])
+            ELSE
+                r = CINT(px[i * ch])
+                g = r
+                b = r
+            ENDIF
+            keys[f * npix + i] = r * 65536 + g * 256 + b
+        NEXT i
+    NEXT f
+    ' sorted distinct keys (UNIQUE is quadratic for many colors); stops counting past 256
+    DIM allord AS ARRAY = GRADE(keys)
+    DIM sorted AS ARRAY = ZEROS([257])
+    DIM nu AS INTEGER = 0
+    DIM kprev AS INTEGER = -1
+    DIM kcur AS INTEGER = 0
+    FOR i = 0 TO npix * nf - 1
+        kcur = CINT(keys[CINT(allord[i])])
+        IF kcur <> kprev THEN
+            IF nu = 256 THEN
+                nu = 257
+                EXITFOR
+            ENDIF
+            sorted[nu] = kcur
+            nu = nu + 1
+            kprev = kcur
+        ENDIF
+    NEXT i
+    DIM res AS MAP = {}
+    DIM pal AS ARRAY = []
+    DIM idx AS ARRAY = []
+    DIM k AS INTEGER = 0
+    IF nu <= 256 THEN
+        pal = ZEROS([nu * 3])
+        DIM kv AS INTEGER = 0
+        FOR i = 0 TO nu - 1
+            kv = CINT(sorted[i])
+            pal[i * 3] = INT(kv / 65536)
+            pal[i * 3 + 1] = INT(kv / 256) MOD 256
+            pal[i * 3 + 2] = kv MOD 256
+        NEXT i
+        DIM lo AS INTEGER = 0
+        DIM hi AS INTEGER = 0
+        DIM mid AS INTEGER = 0
+        DIM key AS INTEGER = 0
+        FOR f = 0 TO nf - 1
+            DIM ia AS ARRAY = ZEROS([npix])
+            FOR i = 0 TO npix - 1
+                key = CINT(keys[f * npix + i])
+                lo = 0
+                hi = nu - 1
+                WHILE lo < hi
+                    mid = INT((lo + hi) / 2)
+                    IF sorted[mid] < key THEN
+                        lo = mid + 1
+                    ELSE
+                        hi = mid
+                    ENDIF
+                WEND
+                ia[i] = lo
+            NEXT i
+            PUSH(idx, ia)
+        NEXT f
+    ELSE
+        ' 6 x 7 x 6 cube
+        pal = ZEROS([252 * 3])
+        FOR r = 0 TO 5
+            FOR g = 0 TO 6
+                FOR b = 0 TO 5
+                    k = r * 42 + g * 6 + b
+                    pal[k * 3] = INT(r * 255 / 5 + 0.5)
+                    pal[k * 3 + 1] = INT(g * 255 / 6 + 0.5)
+                    pal[k * 3 + 2] = INT(b * 255 / 5 + 0.5)
+                NEXT b
+            NEXT g
+        NEXT r
+        DIM kk AS INTEGER = 0
+        FOR f = 0 TO nf - 1
+            DIM ib AS ARRAY = ZEROS([npix])
+            FOR i = 0 TO npix - 1
+                kk = CINT(keys[f * npix + i])
+                r = INT(INT(kk / 65536) * 5 / 255 + 0.5)
+                g = INT((INT(kk / 256) MOD 256) * 6 / 255 + 0.5)
+                b = INT((kk MOD 256) * 5 / 255 + 0.5)
+                ib[i] = r * 42 + g * 6 + b
+            NEXT i
+            PUSH(idx, ib)
+        NEXT f
+    ENDIF
+    res{"palette"} = pal
+    res{"frames"} = idx
+    res{"width"} = w
+    res{"height"} = h
+    RETURN res
+ENDFUNC
+
+' ---- LZW ----
+
+' One frame of palette indices as image data: min code size byte, sub-blocks, terminator.
+FUNC LzwFrame(ia AS ARRAY, npix AS INTEGER, mcs AS INTEGER) AS ARRAY
+    DIM nsym AS INTEGER = 2 ^ mcs
+    DIM clr AS INTEGER = nsym
+    DIM eoi AS INTEGER = nsym + 1
+    DIM cap AS INTEGER = npix * 2 + 64
+    DIM lz AS ARRAY = ZEROS([cap])
+    DIM nb AS INTEGER = 0
+    DIM acc AS INTEGER = 0
+    DIM nbits AS INTEGER = 0
+    DIM size AS INTEGER = mcs + 1
+    DIM nextc AS INTEGER = nsym + 2
+    DIM child AS ARRAY = ZEROS([4096 * nsym])
+    DIM i AS INTEGER = 0
+    DIM cur AS INTEGER = 0
+    DIM p AS INTEGER = 0
+    DIM c AS INTEGER = 0
+    DIM code AS INTEGER = 0
+    DIM stage AS INTEGER = 0
+    ' stage 0: leading clear; 1: run; 2: final code; 3: eoi
+    code = clr
+    acc = code
+    nbits = size
+    cur = CINT(ia[0])
+    FOR i = 1 TO npix - 1
+        p = CINT(ia[i])
+        c = CINT(child[cur * nsym + p])
+        IF c > 0 THEN
+            cur = c
+        ELSE
+            ' emit cur
+            acc = acc + cur * (2 ^ nbits)
+            nbits = nbits + size
+            WHILE nbits >= 8
+                lz[nb] = acc MOD 256
+                nb = nb + 1
+                acc = INT(acc / 256)
+                nbits = nbits - 8
+            WEND
+            IF nextc < 4096 THEN
+                child[cur * nsym + p] = nextc
+                nextc = nextc + 1
+                IF nextc > (2 ^ size) AND size < 12 THEN size = size + 1
+            ELSE
+                ' table full: emit clear (at the current width), reset
+                acc = acc + clr * (2 ^ nbits)
+                nbits = nbits + size
+                WHILE nbits >= 8
+                    lz[nb] = acc MOD 256
+                    nb = nb + 1
+                    acc = INT(acc / 256)
+                    nbits = nbits - 8
+                WEND
+                child = ZEROS([4096 * nsym])
+                nextc = nsym + 2
+                size = mcs + 1
+            ENDIF
+            cur = p
+        ENDIF
+    NEXT i
+    acc = acc + cur * (2 ^ nbits)
+    nbits = nbits + size
+    WHILE nbits >= 8
+        lz[nb] = acc MOD 256
+        nb = nb + 1
+        acc = INT(acc / 256)
+        nbits = nbits - 8
+    WEND
+    ' the decoder adds an entry for this last code too, which can widen the eoi code
+    IF nextc = (2 ^ size) AND size < 12 THEN size = size + 1
+    acc = acc + eoi * (2 ^ nbits)
+    nbits = nbits + size
+    WHILE nbits >= 8
+        lz[nb] = acc MOD 256
+        nb = nb + 1
+        acc = INT(acc / 256)
+        nbits = nbits - 8
+    WEND
+    IF nbits > 0 THEN
+        lz[nb] = acc MOD 256
+        nb = nb + 1
+    ENDIF
+    ' sub-blocks
+    DIM nblocks AS INTEGER = INT((nb + 254) / 255)
+    DIM out AS ARRAY = ZEROS([nb + nblocks + 2])
+    DIM o AS INTEGER = 0
+    DIM take AS INTEGER = 0
+    DIM at AS INTEGER = 0
+    DIM j AS INTEGER = 0
+    out[0] = mcs
+    o = 1
+    WHILE at < nb
+        take = nb - at
+        IF take > 255 THEN take = 255
+        out[o] = take
+        o = o + 1
+        FOR j = 0 TO take - 1
+            out[o] = lz[at + j]
+            o = o + 1
+        NEXT j
+        at = at + take
+    WEND
+    out[o] = 0
+    RETURN out
+ENDFUNC
+
+FUNC U16(arr AS ARRAY, at AS INTEGER, v AS INTEGER) AS INTEGER
+    arr[at] = v MOD 256
+    arr[at + 1] = INT(v / 256)
+    RETURN at + 2
+ENDFUNC
+
+' ---- encode ----
+
+EXPORT FUNC ENCODEINDEXED$(w AS INTEGER, h AS INTEGER, palette AS ARRAY, frames AS ARRAY, delay_ms AS INTEGER)
+    DIM ncol AS INTEGER = INT(LEN(palette) / 3)
+    IF ncol < 1 OR ncol > 256 THEN THROW "GIF: palette needs 1 to 256 colors"
+    IF LEN(frames) < 1 THEN THROW "GIF: no frames"
+    DIM mcs AS INTEGER = 2
+    WHILE (2 ^ mcs) < ncol
+        mcs = mcs + 1
+    WEND
+    DIM gct AS INTEGER = 2 ^ mcs
+    DIM npix AS INTEGER = w * h
+    DIM pieces AS ARRAY = []
+    ' header + logical screen + global color table + NETSCAPE loop
+    DIM hd AS ARRAY = ZEROS([13 + gct * 3 + 19])
+    DIM o AS INTEGER = 0
+    DIM k AS INTEGER = 0
+    hd[0] = 71
+    hd[1] = 73
+    hd[2] = 70
+    hd[3] = 56
+    hd[4] = 57
+    hd[5] = 97
+    o = U16(hd, 6, w)
+    o = U16(hd, o, h)
+    hd[10] = 128 + 112 + (mcs - 1)
+    hd[11] = 0
+    hd[12] = 0
+    o = 13
+    FOR k = 0 TO ncol * 3 - 1
+        hd[o + k] = palette[k]
+    NEXT k
+    o = o + gct * 3
+    DIM net AS ARRAY = [33, 255, 11, 78, 69, 84, 83, 67, 65, 80, 69, 50, 46, 48, 3, 1, 0, 0, 0]
+    FOR k = 0 TO 18
+        hd[o + k] = net[k]
+    NEXT k
+    o = o + 19
+    PUSH(pieces, BytesText$(hd, o))
+    DIM cs AS INTEGER = INT((delay_ms + 5) / 10)
+    DIM f AS INTEGER = 0
+    DIM ctl AS ARRAY = ZEROS([8 + 10])
+    DIM ia AS ARRAY = []
+    DIM lz AS ARRAY = []
+    DIM q AS INTEGER = 0
+    FOR f = 0 TO LEN(frames) - 1
+        ia = frames[f]
+        IF LEN(ia) <> npix THEN THROW "GIF: frame " + STR$(f) + " has " + STR$(LEN(ia)) + " pixels, expected " + STR$(npix)
+        ' graphic control extension + image descriptor
+        ctl[0] = 33
+        ctl[1] = 249
+        ctl[2] = 4
+        ctl[3] = 4
+        q = U16(ctl, 4, cs)
+        ctl[6] = 0
+        ctl[7] = 0
+        ctl[8] = 44
+        q = U16(ctl, 9, 0)
+        q = U16(ctl, 11, 0)
+        q = U16(ctl, 13, w)
+        q = U16(ctl, 15, h)
+        ctl[17] = 0
+        PUSH(pieces, BytesText$(ctl, 18))
+        lz = LzwFrame(ia, npix, mcs)
+        PUSH(pieces, BytesText$(lz, LEN(lz)))
+    NEXT f
+    DIM tail AS ARRAY = [59]
+    PUSH(pieces, BytesText$(tail, 1))
+    RETURN Concat$(pieces)
+ENDFUNC
+
+EXPORT FUNC ENCODE$(frames AS ARRAY, delay_ms AS INTEGER)
+    DIM qz AS MAP = QuantizeFrames(frames)
+    DIM pal AS ARRAY = qz{"palette"}
+    DIM idx AS ARRAY = qz{"frames"}
+    RETURN ENCODEINDEXED$(CINT(qz{"width"}), CINT(qz{"height"}), pal, idx, delay_ms)
+ENDFUNC
+
+' number of bytes written
+EXPORT FUNC WRITE(path$, frames AS ARRAY, delay_ms AS INTEGER) AS INTEGER
+    DIM g$ = ENCODE$(frames, delay_ms)
+    BINWRITER path$, g$
+    RETURN LEN(g$)
+ENDFUNC
+
+EXPORT FUNC WRITEINDEXED(path$, w AS INTEGER, h AS INTEGER, palette AS ARRAY, frames AS ARRAY, delay_ms AS INTEGER) AS INTEGER
+    DIM g$ = ENCODEINDEXED$(w, h, palette, frames, delay_ms)
+    BINWRITER path$, g$
+    RETURN LEN(g$)
+ENDFUNC
+
+' ---- decode (for tests) ----
+
+EXPORT FUNC DECODE(g$) AS MAP
+    IF LEN(g$) < 13 OR LEFT$(g$, 3) <> "GIF" THEN THROW "GIF.DECODE: not a GIF"
+    DIM res AS MAP = {}
+    DIM w AS INTEGER = BYTEAT(g$, 6) + BYTEAT(g$, 7) * 256
+    DIM h AS INTEGER = BYTEAT(g$, 8) + BYTEAT(g$, 9) * 256
+    DIM flags AS INTEGER = BYTEAT(g$, 10)
+    DIM pos AS INTEGER = 13
+    DIM pal AS ARRAY = []
+    DIM i AS INTEGER = 0
+    IF INT(flags / 128) = 1 THEN
+        DIM n3 AS INTEGER = 3 * (2 ^ ((flags MOD 8) + 1))
+        pal = ZEROS([n3])
+        FOR i = 0 TO n3 - 1
+            pal[i] = BYTEAT(g$, pos + i)
+        NEXT i
+        pos = pos + n3
+    ENDIF
+    DIM frames AS ARRAY = []
+    DIM delay AS INTEGER = 0
+    DIM npix AS INTEGER = w * h
+    DIM blk AS INTEGER = 0
+    DIM ln AS INTEGER = 0
+    DIM guard AS INTEGER = 0
+    WHILE pos < LEN(g$)
+        blk = BYTEAT(g$, pos)
+        pos = pos + 1
+        IF blk = 59 THEN EXITDO
+        IF blk = 33 THEN
+            DIM lab AS INTEGER = BYTEAT(g$, pos)
+            pos = pos + 1
+            IF lab = 249 THEN delay = (BYTEAT(g$, pos + 2) + BYTEAT(g$, pos + 3) * 256) * 10
+            ln = BYTEAT(g$, pos)
+            WHILE ln > 0
+                pos = pos + ln + 1
+                ln = BYTEAT(g$, pos)
+            WEND
+            pos = pos + 1
+        ELSEIF blk = 44 THEN
+            pos = pos + 8
+            DIM lf AS INTEGER = BYTEAT(g$, pos)
+            pos = pos + 1
+            IF INT(lf / 128) = 1 THEN THROW "GIF.DECODE: local color tables are not supported"
+            DIM mcs AS INTEGER = BYTEAT(g$, pos)
+            pos = pos + 1
+            ' gather the sub-blocks
+            DIM data AS ARRAY = ZEROS([LEN(g$)])
+            DIM nd AS INTEGER = 0
+            ln = BYTEAT(g$, pos)
+            WHILE ln > 0
+                FOR i = 1 TO ln
+                    data[nd] = BYTEAT(g$, pos + i)
+                    nd = nd + 1
+                NEXT i
+                pos = pos + ln + 1
+                ln = BYTEAT(g$, pos)
+            WEND
+            pos = pos + 1
+            PUSH(frames, LzwDecode(data, nd, mcs, npix))
+        ELSE
+            THROW "GIF.DECODE: unknown block " + STR$(blk)
+        ENDIF
+    WEND
+    res{"width"} = w
+    res{"height"} = h
+    res{"palette"} = pal
+    res{"frames"} = frames
+    res{"delay"} = delay
+    RETURN res
+ENDFUNC
+
+FUNC LzwDecode(data AS ARRAY, nd AS INTEGER, mcs AS INTEGER, npix AS INTEGER) AS ARRAY
+    DIM out AS ARRAY = ZEROS([npix])
+    DIM no AS INTEGER = 0
+    DIM nsym AS INTEGER = 2 ^ mcs
+    DIM clr AS INTEGER = nsym
+    DIM eoi AS INTEGER = nsym + 1
+    DIM prefix AS ARRAY = ZEROS([4096])
+    DIM suffix AS ARRAY = ZEROS([4096])
+    DIM first AS ARRAY = ZEROS([4096])
+    DIM lenc AS ARRAY = ZEROS([4096])
+    DIM i AS INTEGER = 0
+    FOR i = 0 TO nsym - 1
+        suffix[i] = i
+        first[i] = i
+        lenc[i] = 1
+    NEXT i
+    DIM size AS INTEGER = mcs + 1
+    DIM nextc AS INTEGER = nsym + 2
+    DIM acc AS INTEGER = 0
+    DIM nbits AS INTEGER = 0
+    DIM at AS INTEGER = 0
+    DIM prev AS INTEGER = -1
+    DIM code AS INTEGER = 0
+    DIM cc AS INTEGER = 0
+    DIM l AS INTEGER = 0
+    DIM j AS INTEGER = 0
+    DIM t AS INTEGER = 0
+    WHILE no < npix
+        WHILE nbits < size AND at < nd
+            acc = acc + CINT(data[at]) * (2 ^ nbits)
+            at = at + 1
+            nbits = nbits + 8
+        WEND
+        IF nbits < size THEN EXITDO
+        code = acc MOD (2 ^ size)
+        acc = INT(acc / (2 ^ size))
+        nbits = nbits - size
+        IF code = clr THEN
+            size = mcs + 1
+            nextc = nsym + 2
+            prev = -1
+        ELSEIF code = eoi THEN
+            EXITDO
+        ELSE
+            IF prev < 0 THEN
+                out[no] = code
+                no = no + 1
+            ELSE
+                IF code < nextc THEN
+                    cc = code
+                ELSE
+                    cc = prev
+                ENDIF
+                IF nextc < 4096 THEN
+                    prefix[nextc] = prev
+                    suffix[nextc] = first[cc]
+                    first[nextc] = first[prev]
+                    lenc[nextc] = lenc[prev] + 1
+                ENDIF
+                ' write the string for `code` (it is entry nextc when code = nextc)
+                l = lenc[code]
+                IF no + l > npix THEN l = npix - no
+                t = code
+                FOR j = lenc[code] - 1 TO 0 STEP -1
+                    IF no + j < npix THEN out[no + j] = suffix[t]
+                    t = prefix[t]
+                NEXT j
+                no = no + l
+                IF nextc < 4096 THEN nextc = nextc + 1
+                IF nextc = (2 ^ size) AND size < 12 THEN size = size + 1
+            ENDIF
+            prev = code
+        ENDIF
+    WEND
+    RETURN out
+ENDFUNC
+
+EXPORT FUNC READ(path$) AS MAP
+    DIM g$ = BINREADER$(path$)
+    RETURN DECODE(g$)
+ENDFUNC

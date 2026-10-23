@@ -58,6 +58,11 @@ jobs:
         run: |
           JD_TIME=240 tools/jd.sh run tests/reinforce_grad.jdb
           JD_TIME=240 tools/jd.sh native tests/reinforce_grad.jdb
+      - name: gif_selftest (interpreter + native)
+        timeout-minutes: 6
+        run: |
+          JD_TIME=240 tools/jd.sh run tests/gif_selftest.jdb
+          JD_TIME=240 tools/jd.sh native tests/gif_selftest.jdb
       - name: env_parity
         timeout-minutes: 10
         run: python tests/env_parity.py && python tests/env_parity.py --native

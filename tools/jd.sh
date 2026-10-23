@@ -19,6 +19,13 @@ else
   J="${JDBASIC:-/opt/jdbasic/build/jdbasic}"
   CAP="$HERE/capped-linux.sh"
 fi
+# the repo's own lib/ (gif.jdb) is on the IMPORT search path
+if [ "$WIN" = 1 ]; then
+  LIBDIR="$(cygpath -w -a "$HERE/../lib")"; SEP=";"
+else
+  LIBDIR="$(cd "$HERE/../lib" && pwd)"; SEP=":"
+fi
+export JDBASIC_PATH="$LIBDIR${JDBASIC_PATH:+$SEP$JDBASIC_PATH}"
 MEM="${JD_MEM:-1024}"
 TIME="${JD_TIME:-600}"
 mode="$1"; shift
