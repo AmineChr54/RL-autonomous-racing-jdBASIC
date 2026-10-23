@@ -69,8 +69,15 @@ Under -c about 80% of the time is the 52 minibatch updates: compiled scalar loop
 `RL_COMMON` additions: `LOOP_GRADS` (flat gradients, no PUTGRAD), `PERMUTE` (Fisher-Yates; `GRADE(RNG.FILL)` allocates n-sized temporaries).
 Note: the builtin `STDEV` (used by `RL_COMMON.NORMALIZE_COL`) is the population std per the library audit, not unbiased as its comment says (relative diff 1/(2n), harmless at n = 25600); PPO computes the unbiased std itself.
 
+## DQN (dqn.jdb)
+`tools/jd.sh native tests/dqn_smoke.jdb 3`: about 75-96 s/iteration (200 cars, 128 ticks, 256 learn steps of batch 512), peak 65 MB, flat. Interpreted: about 82 s/iteration,
+peak 129 MB, same numbers (3 iterations: best 424/384/504 px, loss 0.229/0.157/0.146, identical in both backends). Learning quality is not yet measured (needs hundreds of iterations at this speed, see #46).
+Like REINFORCE, the compiled path runs forward, target forward, gradients, clip, Adam and polyak as scalar loops over flat arrays (no array temporaries); the interpreter uses the tape.
+`tests/dqn_grad.jdb` checks both give the same loss and gradients (max diff 1.4e-17, both backends). The replay buffer is flat 1-D arrays (150000 transitions).
+`TORCH.LOAD_JSON` is broken under -c (#45), so `tests/dqn_smoke.jdb` only reloads the saved brain when interpreted.
+
 ## Work tracking
 Everything open is a GitHub issue: https://github.com/AmineChr54/RL-autonomous-racing-jdBASIC/issues
-(#19 local CI, #22 DQN, #24 trainer + headless main,
+(#19 local CI, #24 trainer + headless main,
 #25 GUI, #26 plot_curves, #27 bench, #28 PyTorch cross-check, #29 COMPARISON.md).
 Done work and the jdBasic bugs above are closed issues #1-#18.

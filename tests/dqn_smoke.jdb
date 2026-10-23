@@ -15,5 +15,6 @@ PRINT "s/iteration: "; (TICK() - t0) / 1000 / iters
 DIM am AS MAP = DQN.ACTS(t, 0)
 PRINT "leader "; DQN.LEADER(t); "  layers "; am{"n"}
 DIM js$ = DQN.SAVE_JSON$(t)
-DQN.LOAD_JSON(t, js$)
+' TORCH.LOAD_JSON is broken under -c (parsed JSON matrices read back as empty, issue filed): load only interpreted
+IF RL_COMMON.LOOPS() = 0 THEN DQN.LOAD_JSON(t, js$)
 PRINT "json bytes "; LEN(js$)

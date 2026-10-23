@@ -445,13 +445,13 @@ ENDFUNC
 EXPORT SUB LOAD_JSON(t AS MAP, text$)
     DIM net AS MAP = t{"model"}
     DIM tgt AS MAP = t{"target"}
+    DIM sc AS MAP = t{"sc"}
+    DIM sct AS MAP = t{"sct"}
     DIM mp AS ARRAY = TORCH.MLP_PIDS(net)
     DIM tp AS ARRAY = TORCH.MLP_PIDS(tgt)
     TORCH.LOAD_JSON(mp, text$)
     TORCH.COPY_PARAMS(tp, mp)
     IF t{"loops"} = 1 THEN
-        DIM sc AS MAP = t{"sc"}
-        DIM sct AS MAP = t{"sct"}
         RL_COMMON.LOOP_LOAD(net, sc)
         RL_COMMON.LOOP_LOAD(tgt, sct)
     ENDIF

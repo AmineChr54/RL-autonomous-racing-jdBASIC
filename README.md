@@ -23,7 +23,7 @@ The port has three goals:
 | `evolution.jdb` | `evolution.py` | Elites, crossover, mutation | 🚧 interpreter works, native in progress |
 | `rl_common.jdb`, `reinforce.jdb` | `rl_common.py`, `reinforce.py` | Shared rollout plumbing, REINFORCE on `torch.jdb` (tape in the interpreter, leak-free scalar loops under `-c`) | ✅ learns: mean passes half a lap at iteration 38 |
 | `ppo.jdb` | `ppo.py` | PPO: GAE, clipped objective, critic (tape in the interpreter, leak-free scalar loops under `-c`) | ✅ learns: mean passes half a lap at iteration 11, 5613 px mean after 50 |
-| `dqn.jdb` | `dqn.py` | DQN | ⏳ |
+| `dqn.jdb` | `dqn.py` | DQN: replay buffer, target net, tape in the interpreter, scalar loops under `-c` | ✅ runs, gradients match; ~80 s/iteration, learning not yet measured |
 | `main.jdb` | `main.py` | Window (GFX) and headless modes, same flags and keys | ⏳ |
 | `plot_curves.jdb`, `bench.jdb` | `plot_curves.py`, `accel.py` | Learning-curve chart (SVG), timings interpreted vs native | ⏳ |
 
