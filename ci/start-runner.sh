@@ -13,7 +13,6 @@ docker rm -f "$NAME" >/dev/null 2>&1 || true
 TOKEN="$(gh api -X POST "repos/$REPO/actions/runners/registration-token" --jq .token)"
 docker run -d --name "$NAME" --restart unless-stopped \
   --memory 3g --memory-swap 3g --cpus 4 \
-  -v "$JDB_DIR:/opt/jdbasic:ro" \
   -e REPO="$REPO" -e RUNNER_NAME="$NAME" -e RUNNER_TOKEN="$TOKEN" \
   jdbasic-runner
 echo "started $NAME; check: gh api repos/$REPO/actions/runners --jq '.runners[]|[.name,.status]'"
