@@ -1,0 +1,74 @@
+' DQN gradient check: the scalar-loop gradients (used under -c) must equal the TORCH tape gradients
+' (used by the interpreter: GATHERCOL + SMOOTH_L1) on a random minibatch, with a target net that differs from the model.
+'   tools/jd.sh run tests/dqn_grad.jdb && tools/jd.sh native tests/dqn_grad.jdb
+IMPORT TRACK, ENV, DQN, RL_COMMON, TORCH
+DIM tr AS MAP = TRACK.NEW("hard")
+DIM e AS MAP = ENV.NEW(tr, 4, 900, 0)
+DIM t AS MAP = DQN.NEW(e, 0)
+DIM net AS MAP = t{"model"}
+DIM tgt AS MAP = t{"target"}
+DIM gen AS INTEGER = RNG.NEW(7)
+DIM B AS INTEGER = 512
+DIM bo AS ARRAY = t{"bo"}
+DIM bn AS ARRAY = t{"bn"}
+DIM ba AS ARRAY = t{"ba"}
+DIM br AS ARRAY = t{"br"}
+DIM bd AS ARRAY = t{"bd"}
+DIM i AS INTEGER = 0
+FOR i = 0 TO LEN(bo) - 1
+    bo[i] = RNG.NEXT(gen) * 2 - 1
+    bn[i] = RNG.NEXT(gen) * 2 - 1
+NEXT i
+FOR i = 0 TO B - 1
+    ba[i] = RNG.INT(gen, 0, 4)
+    br[i] = RNG.NEXT(gen) * 6 - 3
+    IF RNG.NEXT(gen) < 0.1 THEN bd[i] = 1
+NEXT i
+' make the target differ from the model
+DIM tp AS ARRAY = TORCH.MLP_PIDS(tgt)
+DIM pv AS ARRAY = TORCH.PVAL(tp[0])
+FOR i = 0 TO LEN(tp) - 1
+    pv = TORCH.PVAL(tp[i])
+    TORCH.PUT(tp[i], pv + pv * 0.3 + 0.05)
+NEXT i
+DIM mp AS ARRAY = TORCH.MLP_PIDS(net)
+t{"sc"} = RL_COMMON.LOOP_NEW(net, B)
+t{"sct"} = RL_COMMON.LOOP_NEW(tgt, B)
+DIM sc AS MAP = t{"sc"}
+RL_COMMON.LOOP_LOAD(net, sc)
+DIM sct AS MAP = t{"sct"}
+RL_COMMON.LOOP_LOAD(tgt, sct)
+DIM lt AS DOUBLE = DQN.GradsTape(t)
+DIM saved AS MAP = {}
+DIM g AS ARRAY = TORCH.PGRAD(mp[0])
+FOR i = 0 TO LEN(mp) - 1
+    g = TORCH.PGRAD(mp[i])
+    saved{STR$(i)} = g + 0
+NEXT i
+DIM ll AS DOUBLE = DQN.GradsLoop(t)
+DIM maxd AS DOUBLE = 0.0
+DIM d AS DOUBLE = 0.0
+DIM sv AS ARRAY = g
+DIM lf AS ARRAY = g
+DIM sv1 AS ARRAY = g
+DIM l AS INTEGER = 0
+DIM nl AS INTEGER = net{"nl"}
+FOR l = 0 TO nl - 1
+    sv = saved{STR$(2 * l)}
+    sv1 = RESHAPE(sv, [LEN(sv) * LEN(sv[0])])
+    lf = sc{"gw" + STR$(l)}
+    d = MAX(ABS(lf - sv1))
+    IF d > maxd THEN maxd = d
+    sv = saved{STR$(2 * l + 1)}
+    sv1 = RESHAPE(sv, [LEN(sv) * LEN(sv[0])])
+    lf = sc{"gb" + STR$(l)}
+    d = MAX(ABS(lf - sv1))
+    IF d > maxd THEN maxd = d
+NEXT l
+PRINT "loss tape "; lt; "  loop "; ll
+PRINT "max grad diff "; FORMAT$("{:.3e}", maxd)
+IF ABS(lt - ll) < 0.000001 AND maxd < 0.000001 THEN
+    PRINT "PASS"
+ELSE
+    PRINT "FAIL"
+ENDIF

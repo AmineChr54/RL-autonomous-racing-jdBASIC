@@ -416,3 +416,102 @@ EXPORT SUB PERMUTE(perm AS ARRAY, n AS INTEGER, gen AS INTEGER)
         perm[j] = tmp
     NEXT i
 ENDSUB
+
+' ---------------------------------------------------------------- kernels that keep the weights in the scratch
+' (DQN). LOOP_FWD / LOOP_BWD re-read the weights from TORCH and hand the gradients to TORCH, which allocates
+' (and, compiled, leaks) a few array temporaries per call. For hundreds of learn steps per iteration the weights
+' live in the scratch (w<l>, b<l>) and the gradients stay there (gw<l>, gb<l>); the caller owns the optimiser.
+
+' TORCH params -> scratch w<l>, b<l> (all layers)
+EXPORT SUB LOOP_LOAD(net AS MAP, sc AS MAP)
+    DIM l AS INTEGER = 0
+    FOR l = 0 TO CINT(net{"nl"}) - 1
+        LoadLayer(net, sc, l)
+    NEXT l
+ENDSUB
+
+' scratch w<l>, b<l> -> TORCH params (once per iteration is fine: it allocates 2-D copies)
+EXPORT SUB LOOP_STORE(net AS MAP, sc AS MAP)
+    DIM pids AS ARRAY = net{"pids"}
+    DIM sizes AS ARRAY = net{"sizes"}
+    DIM l AS INTEGER = 0
+    DIM k AS INTEGER = 0
+    DIM j AS INTEGER = 0
+    DIM kin AS INTEGER = 0
+    DIM kout AS INTEGER = 0
+    DIM wf AS ARRAY = sc{"w0"}
+    DIM bf AS ARRAY = sc{"b0"}
+    DIM W2 AS ARRAY = TORCH.ZEROS_RC(1, 1)
+    DIM B2 AS ARRAY = TORCH.ZEROS_RC(1, 1)
+    FOR l = 0 TO CINT(net{"nl"}) - 1
+        kin = CINT(sizes[l])
+        kout = CINT(sizes[l + 1])
+        wf = sc{"w" + STR$(l)}
+        bf = sc{"b" + STR$(l)}
+        W2 = TORCH.ZEROS_RC(kin, kout)
+        B2 = TORCH.ZEROS_RC(1, kout)
+        FOR k = 0 TO kin - 1
+            FOR j = 0 TO kout - 1
+                W2[k, j] = wf[k * kout + j]
+            NEXT j
+        NEXT k
+        FOR j = 0 TO kout - 1
+            B2[0, j] = bf[j]
+        NEXT j
+        TORCH.PUT(pids[2 * l], W2)
+        TORCH.PUT(pids[2 * l + 1], B2)
+    NEXT l
+ENDSUB
+
+' LOOP_FWD with the weights already in the scratch
+EXPORT SUB LOOP_FWD_W(net AS MAP, sc AS MAP, X AS ARRAY, rows AS INTEGER)
+    DIM sizes AS ARRAY = net{"sizes"}
+    DIM nl AS INTEGER = net{"nl"}
+    DIM l AS INTEGER = 0
+    DIM hid AS INTEGER = 0
+    DIM src AS ARRAY = X
+    DIM dst AS ARRAY = sc{"a0"}
+    DIM wf AS ARRAY = sc{"w0"}
+    DIM bf AS ARRAY = sc{"b0"}
+    FOR l = 0 TO nl - 1
+        IF l > 0 THEN src = sc{"a" + STR$(l - 1)}
+        dst = sc{"a" + STR$(l)}
+        wf = sc{"w" + STR$(l)}
+        bf = sc{"b" + STR$(l)}
+        hid = 0
+        IF l < nl - 1 THEN hid = 1
+        LayerFwd(src, wf, bf, dst, rows, CINT(sizes[l]), CINT(sizes[l + 1]), hid)
+    NEXT l
+ENDSUB
+
+' LOOP_BWD that leaves the gradients in the scratch (gw<l>, gb<l>) instead of calling TORCH.PUTGRAD
+EXPORT SUB LOOP_BWD_W(net AS MAP, sc AS MAP, X AS ARRAY, rows AS INTEGER)
+    DIM sizes AS ARRAY = net{"sizes"}
+    DIM nl AS INTEGER = net{"nl"}
+    DIM l AS INTEGER = 0
+    DIM wf AS ARRAY = sc{"w0"}
+    DIM dZ AS ARRAY = sc{"d0"}
+    DIM GW AS ARRAY = sc{"gw0"}
+    DIM GB AS ARRAY = sc{"gb0"}
+    DIM src AS ARRAY = X
+    DIM dprev AS ARRAY = X
+    DIM aprev AS ARRAY = X
+    DIM hp AS INTEGER = 0
+    FOR l = nl - 1 TO 0 STEP -1
+        src = X
+        dprev = X
+        aprev = X
+        hp = 0
+        IF l > 0 THEN
+            src = sc{"a" + STR$(l - 1)}
+            dprev = sc{"d" + STR$(l - 1)}
+            aprev = src
+            hp = 1
+        ENDIF
+        wf = sc{"w" + STR$(l)}
+        dZ = sc{"d" + STR$(l)}
+        GW = sc{"gw" + STR$(l)}
+        GB = sc{"gb" + STR$(l)}
+        LayerBwd(src, wf, dZ, GW, GB, dprev, aprev, rows, CINT(sizes[l]), CINT(sizes[l + 1]), hp)
+    NEXT l
+ENDSUB
