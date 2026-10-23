@@ -13,3 +13,4 @@ __pycache__/
 # scratch
 spikes/
 .claude/settings.local.json
+imgui.ini

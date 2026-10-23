@@ -20,7 +20,7 @@ jobs:
         run: git clone --depth 1 "$PY_REPO" "$RUNNER_TEMP/py" && echo "PY_PROJECT=$RUNNER_TEMP/py" >> "$GITHUB_ENV"
       - name: Compile Python tests and tools
         timeout-minutes: 2
-        run: python -m py_compile tests/env_parity.py tests/brain_parity.py tools/jd.py
+        run: python -m py_compile tests/env_parity.py tests/brain_parity.py tests/gui_pixels.py tools/jd.py
       - name: Python original imports (track, env, brain)
         timeout-minutes: 5
         run: cd "$PY_PROJECT" && python -c "import track, env, brain; print('genome_size', brain.genome_size())"
@@ -69,6 +69,9 @@ jobs:
       - name: brain_parity
         timeout-minutes: 10
         run: python tests/brain_parity.py && python tests/brain_parity.py --native
+      - name: gui_pixels (road pre-render vs numpy, interpreter + native)
+        timeout-minutes: 10
+        run: python tests/gui_pixels.py && python tests/gui_pixels.py --native
       - name: main.jdb headless smoke (interpreter all modes, native evolution + dqn)
         timeout-minutes: 8
         run: bash tests/main_smoke.sh && bash tests/main_smoke.sh native

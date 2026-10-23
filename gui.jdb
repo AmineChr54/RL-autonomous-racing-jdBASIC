@@ -1,0 +1,337 @@
+' gui.jdb - the drawing code of main.py's pygame window in jdBasic GFX (1400 x 700: world 1000 x 700 + 400 panel).
+' main.jdb owns the event loop; this module draws one frame:
+'   DIM g AS MAP = GUI.NEW(track, ncars)             ' window, pre-rendered track image, line buffers
+'   GUI.DRAW(g, t, speed, turbo, flash$)             ' world + side panel of trainer t
+' Every constant (colours, layout, sizes) is copied from main.py's run_gui.
+' Cars are drawn as filled quads: 8 lines along the heading, 1 px apart (GFX has no polygon fill), the whole swarm in one
+' LINE matrix call with a colour row per line. The matrices are made once and refilled by element (whole-array
+' temporaries leak under -c, see STATUS.md bug 9).
+EXPORT MODULE GUI
+IMPORT TRACK, ENV, TRAINER, DQN, IMG, TORCH
+
+EXPORT CONST PANEL = 400
+EXPORT CONST WIN_W = 1400       ' TRACK.WORLD_W + PANEL
+EXPORT CONST WIN_H = 700
+CONST LPC = 8                   ' LINE rows per car
+
+FUNC FontFile$(bold AS INTEGER)
+    DIM f$ = "C:\Windows\Fonts\consola.ttf"
+    IF bold = 1 THEN f$ = "C:\Windows\Fonts\consolab.ttf"
+    IF FILE.EXISTS(f$) THEN RETURN f$
+    RETURN ""
+ENDFUNC
+
+' pygame.font.SysFont("consolas", size, bold) -> SETFONT; the jdBasic default font where Consolas is missing
+EXPORT SUB TXT(s$, x, y, size AS INTEGER, bold AS INTEGER, r AS INTEGER, g AS INTEGER, b AS INTEGER)
+    DIM f$ = FontFile$(bold)
+    IF f$ <> "" THEN SETFONT f$, size
+    TEXT x, y, s$, r, g, b
+ENDSUB
+
+' ---------------------------------------------------------------- the pre-rendered road
+' background (30, 33, 40), road (62, 67, 78), white edge (235, 235, 240) = mask minus its 8-neighbour erosion
+' (the one-pixel border of the image is never an edge, as in numpy), yellow start line (250, 250, 90) 3 px wide, +-35 px.
+EXPORT FUNC TRACK_PIXELS(tr AS MAP) AS ARRAY
+    DIM mask AS ARRAY = tr{"mask"}
+    DIM W AS INTEGER = TRACK.WORLD_W
+    DIM H AS INTEGER = TRACK.WORLD_H
+    DIM px AS ARRAY = ZEROS([W * H * 3])
+    DIM x AS INTEGER = 0
+    DIM y AS INTEGER = 0
+    DIM p AS INTEGER = 0
+    DIM q AS INTEGER = 0
+    DIM edge AS INTEGER = 0
+    FOR y = 0 TO H - 1
+        FOR x = 0 TO W - 1
+            p = y * W + x
+            q = p * 3
+            IF mask[p] > 0 THEN
+                px[q] = 62
+                px[q + 1] = 67
+                px[q + 2] = 78
+                edge = 0
+                IF y >= 1 AND y <= H - 2 AND x >= 1 AND x <= W - 2 THEN
+                    IF mask[p - 1] + mask[p + 1] + mask[p - W] + mask[p + W] + mask[p - W - 1] + mask[p - W + 1] + mask[p + W - 1] + mask[p + W + 1] < 8 THEN edge = 1
+                ENDIF
+                IF edge = 1 THEN
+                    px[q] = 235
+                    px[q + 1] = 235
+                    px[q + 2] = 240
+                ENDIF
+            ELSE
+                px[q] = 30
+                px[q + 1] = 33
+                px[q + 2] = 40
+            ENDIF
+        NEXT x
+    NEXT y
+    DIM sp AS ARRAY = TRACK.START_POSE(tr, 0)
+    DIM nx AS DOUBLE = -SIN(sp[2])
+    DIM ny AS DOUBLE = COS(sp[2])
+    DIM hx AS DOUBLE = COS(sp[2])
+    DIM hy AS DOUBLE = SIN(sp[2])
+    DIM k AS INTEGER = 0
+    DIM wd AS INTEGER = 0
+    DIM xx AS INTEGER = 0
+    DIM yy AS INTEGER = 0
+    FOR k = -70 TO 70
+        FOR wd = -1 TO 1
+            xx = CINT(sp[0] + nx * k * 0.5 + hx * wd)
+            yy = CINT(sp[1] + ny * k * 0.5 + hy * wd)
+            IF xx >= 0 AND xx < W AND yy >= 0 AND yy < H THEN
+                q = (yy * W + xx) * 3
+                px[q] = 250
+                px[q + 1] = 250
+                px[q + 2] = 90
+            ENDIF
+        NEXT wd
+    NEXT k
+    RETURN px
+ENDFUNC
+
+' cache/track_<name>.png, built once (IMG.WRITEPNG), then GFX.LOADIMAGE every run
+FUNC TrackImage(tr AS MAP) AS INTEGER
+    DIM path$ = "cache/track_" + tr{"name"} + ".png"
+    IF FILE.EXISTS(path$) = 0 THEN
+        MKDIR "cache"
+        DIM px AS ARRAY = TRACK_PIXELS(tr)
+        DIM im AS MAP = IMG.FROMPIXELS(TRACK.WORLD_W, TRACK.WORLD_H, 3, px)
+        DIM n AS INTEGER = IMG.WRITEPNG(im, path$, {"filter": "sub", "level": 1})
+    ENDIF
+    RETURN GFX.LOADIMAGE(path$)
+ENDFUNC
+
+' ---------------------------------------------------------------- state
+EXPORT FUNC NEW(tr AS MAP, n AS INTEGER) AS MAP
+    DIM g = {}
+    SCREEN WIN_W, WIN_H, "RL swarm racing"
+    g{"bg"} = TrackImage(tr)
+    g{"n"} = n
+    g{"lines"} = TORCH.ZEROS_RC(n * LPC, 4)
+    g{"cols"} = TORCH.ZEROS_RC(n * LPC, 3)
+    g{"track"} = tr
+    RETURN g
+ENDFUNC
+
+' red -> green by progress; pygame: (int(235 (1-t) + 40 t), int(60 + 170 t), 50)
+FUNC CarColor(t AS DOUBLE) AS ARRAY
+    DIM u AS DOUBLE = t
+    IF u < 0 THEN u = 0
+    IF u > 1 THEN u = 1
+    RETURN [INT(235 * (1 - u) + 40 * u), INT(60 + 170 * u), 50]
+ENDFUNC
+
+SUB DrawCars(g AS MAP, e AS MAP)
+    DIM n AS INTEGER = e{"n"}
+    DIM prog AS ARRAY = e{"progress"}
+    DIM xs AS ARRAY = e{"x"}
+    DIM ys AS ARRAY = e{"y"}
+    DIM th AS ARRAY = e{"th"}
+    DIM al AS ARRAY = e{"alive"}
+    DIM ln AS ARRAY = g{"lines"}
+    DIM cl AS ARRAY = g{"cols"}
+    DIM pmax AS DOUBLE = MAX(prog)
+    IF pmax < 1 THEN pmax = 1
+    DIM order AS ARRAY = GRADE(prog)
+    DIM k AS INTEGER = 0
+    DIM i AS INTEGER = 0
+    DIM j AS INTEGER = 0
+    DIM r AS INTEGER = 0
+    DIM ca AS DOUBLE = 0.0
+    DIM sa AS DOUBLE = 0.0
+    DIM o AS DOUBLE = 0.0
+    DIM cc AS ARRAY = [0, 0, 0]
+    FOR k = 0 TO n - 1
+        i = CINT(order[k])
+        IF al[i] > 0 THEN
+            cc = CarColor(prog[i] / pmax)
+        ELSE
+            cc = [70, 50, 55]
+        ENDIF
+        ca = COS(th[i])
+        sa = SIN(th[i])
+        FOR j = 0 TO LPC - 1
+            o = j - 3.5
+            r = k * LPC + j
+            ln[r, 0] = xs[i] - 7 * ca - sa * o
+            ln[r, 1] = ys[i] - 7 * sa + ca * o
+            ln[r, 2] = xs[i] + 8 * ca - sa * o
+            ln[r, 3] = ys[i] + 8 * sa + ca * o
+            cl[r, 0] = cc[0]
+            cl[r, 1] = cc[1]
+            cl[r, 2] = cc[2]
+        NEXT j
+    NEXT k
+    LINE ln, cl
+ENDSUB
+
+SUB DrawLeader(t AS MAP, e AS MAP, lead AS INTEGER)
+    DIM al AS ARRAY = e{"alive"}
+    IF al[lead] = 0 THEN RETURN
+    DIM obs AS ARRAY = t{"obs"}
+    DIM xs AS ARRAY = e{"x"}
+    DIM ys AS ARRAY = e{"y"}
+    DIM th AS ARRAY = e{"th"}
+    DIM ra AS ARRAY = e{"ray_angles"}
+    DIM lx AS DOUBLE = xs[lead]
+    DIM ly AS DOUBLE = ys[lead]
+    DIM a AS DOUBLE = 0.0
+    DIM d AS DOUBLE = 0.0
+    DIM r AS INTEGER = 0
+    FOR r = 0 TO ENV.N_RAYS - 1
+        a = th[lead] + ra[r]
+        d = obs[lead, r] * ENV.RAY_RANGE
+        LINE lx, ly, lx + COS(a) * d, ly + SIN(a) * d, 255, 235, 120
+    NEXT r
+    CIRCLE INT(lx), INT(ly), 11, FALSE, 255, 255, 255
+ENDSUB
+
+' ---------------------------------------------------------------- side panel
+SUB DrawCurve(hist AS ARRAY, gx AS INTEGER, gy AS INTEGER, gw AS INTEGER, gh AS INTEGER, ymax AS DOUBLE, r AS INTEGER, g AS INTEGER, b AS INTEGER)
+    DIM n AS INTEGER = LEN(hist)
+    DIM i AS INTEGER = 0
+    DIM x0 AS DOUBLE = 0.0
+    DIM y0 AS DOUBLE = 0.0
+    DIM x1 AS DOUBLE = 0.0
+    DIM y1 AS DOUBLE = 0.0
+    DIM v AS DOUBLE = 0.0
+    FOR i = 0 TO n - 1
+        v = hist[i] / ymax
+        IF v > 1 THEN v = 1
+        x1 = gx + gw * i / (n - 1)
+        y1 = gy + gh - gh * v
+        IF i > 0 THEN
+            LINE x0, y0, x1, y1, r, g, b        ' pygame width 2: the segment twice, one px apart
+            LINE x0, y0 + 1, x1, y1 + 1, r, g, b
+        ENDIF
+        x0 = x1
+        y0 = y1
+    NEXT i
+ENDSUB
+
+SUB DrawBrain(t AS MAP, lead AS INTEGER, gx AS INTEGER, gw AS INTEGER, by AS INTEGER)
+    TXT "brain of the leader car", gx, by - 18, 13, 0, 150, 156, 170
+    DIM acts AS MAP = TRAINER.ACTS(t, lead)
+    DIM cols AS INTEGER = acts{"n"}
+    DIM maxn AS INTEGER = 14
+    DIM a AS ARRAY = [0]
+    DIM nxt AS ARRAY = [0]
+    DIM li AS INTEGER = 0
+    DIM ni AS INTEGER = 0
+    DIM nj AS INTEGER = 0
+    DIM n AS INTEGER = 0
+    DIM nn AS INTEGER = 0
+    DIM xx AS DOUBLE = 0.0
+    DIM yy AS DOUBLE = 0.0
+    DIM nx AS DOUBLE = 0.0
+    DIM v AS DOUBLE = 0.0
+    DIM sz AS INTEGER = 0
+    DIM lab$ = ""
+    FOR li = 0 TO cols - 1
+        a = acts{TRIM$(STR$(li))}
+        sz = LEN(a)
+        xx = gx + 30 + li * (gw - 90) / (cols - 1)
+        n = sz
+        IF n > maxn THEN n = maxn
+        FOR ni = 0 TO n - 1
+            yy = by + 12 + (ni + 0.5) * 215 / maxn
+            v = a[ni]
+            IF v > 1 THEN v = 1
+            IF v < -1 THEN v = -1
+            IF li < cols - 1 THEN       ' light wires to the next layer
+                nxt = acts{TRIM$(STR$(li + 1))}
+                nn = LEN(nxt)
+                IF nn > maxn THEN nn = maxn
+                nx = gx + 30 + (li + 1) * (gw - 90) / (cols - 1)
+                FOR nj = 0 TO nn - 1 STEP 3
+                    LINE xx, yy, nx, by + 12 + (nj + 0.5) * 215 / maxn, 40, 43, 52
+                NEXT nj
+            ENDIF
+            CIRCLE INT(xx), INT(yy), 6, TRUE, INT(60 + 190 * MAX([v, 0])), INT(70 + 60 * ABS(v)), INT(80 + 170 * MAX([-v, 0]))
+        NEXT ni
+        lab$ = TRIM$(STR$(sz))
+        IF sz > maxn THEN lab$ = lab$ + "+"
+        TXT lab$, INT(xx) - 8, by + 232, 13, 0, 110, 116, 130
+    NEXT li
+    DIM labels AS ARRAY = ["steer", "gas"]
+    IF t{"mode"} = "dqn" THEN labels = ["Q:L", "Q:l", "Q:0", "Q:r", "Q:R"]
+    DIM outn AS INTEGER = LEN(a)
+    IF outn > LEN(labels) THEN outn = LEN(labels)
+    DIM ox AS DOUBLE = gx + 30 + (cols - 1) * (gw - 90) / (cols - 1)
+    DIM lb$ = ""
+    FOR ni = 0 TO outn - 1
+        lb$ = labels[ni]
+        TXT lb$, INT(ox) + 12, INT(by + 12 + (ni + 0.5) * 215 / maxn) - 7, 13, 0, 180, 185, 195
+    NEXT ni
+    TXT "blue = negative, orange = positive", gx, by + 250, 13, 0, 110, 116, 130
+ENDSUB
+
+SUB DrawPanel(g AS MAP, t AS MAP, e AS MAP, lead AS INTEGER, speed AS INTEGER, turbo AS INTEGER)
+    DIM tr AS MAP = g{"track"}
+    DIM px AS INTEGER = TRACK.WORLD_W
+    DIM mode$ = t{"mode"}
+    DIM prog AS ARRAY = e{"progress"}
+    DIM al AS ARRAY = e{"alive"}
+    DIM tl AS DOUBLE = tr{"length"}
+    DIM gen AS INTEGER = t{"generation"}
+    RECT px, 0, PANEL, WIN_H, TRUE, 22, 24, 29
+    TXT UCASE$(t{"name"}), px + 15, 10, 22, 1, 255, 214, 102
+    IF mode$ = "evolution" THEN
+        TXT "generation " + TRIM$(STR$(gen)), px + 15, 42, 16, 0, 225, 228, 235
+    ELSE
+        TXT "iteration " + TRIM$(STR$(gen)), px + 15, 42, 16, 0, 225, 228, 235
+    ENDIF
+    DIM alive AS INTEGER = CINT(SUM(al))
+    TXT FORMAT$("cars alive: {}/{}   laps (leader): {:4.2f}", alive, e{"n"}, prog[lead] / tl), px + 15, 62, 16, 0, 225, 228, 235
+    DIM hb AS ARRAY = t{"hist_best"}
+    DIM hm AS ARRAY = t{"hist_mean"}
+    DIM nh AS INTEGER = LEN(hb)
+    IF nh > 0 THEN
+        TXT FORMAT$("last gen best {:6.0f}px   mean {:6.0f}px", hb[nh - 1], hm[nh - 1]), px + 15, 82, 16, 0, 225, 228, 235
+    ENDIF
+    DIM extra$ = "speed x" + TRIM$(STR$(speed))
+    IF turbo = 1 THEN extra$ = extra$ + "  [TURBO]"
+    IF mode$ = "evolution" THEN extra$ = extra$ + "   hw: jdBasic"
+    IF mode$ = "dqn" THEN extra$ = extra$ + FORMAT$("   eps {:.2f}", DQN.EPSILON(t))
+    TXT extra$, px + 15, 102, 13, 0, 150, 156, 170
+
+    ' fitness graph
+    DIM gx AS INTEGER = px + 15
+    DIM gy AS INTEGER = 140
+    DIM gw AS INTEGER = PANEL - 30
+    DIM gh AS INTEGER = 170
+    RECT gx, gy, gw, gh, TRUE, 34, 37, 45
+    TXT "distance driven per generation", gx, gy - 18, 13, 0, 150, 156, 170
+    DIM ymax AS DOUBLE = tl * 1.5
+    DIM bm AS DOUBLE = 0.0
+    IF nh > 0 THEN bm = MAX(hb) * 1.05
+    IF bm > ymax THEN ymax = bm
+    DIM lap AS INTEGER = 0
+    DIM yy AS DOUBLE = 0.0
+    FOR lap = 1 TO INT(ymax / tl)
+        yy = gy + gh - gh * lap * tl / ymax
+        LINE gx, yy, gx + gw, yy, 60, 64, 74
+        TXT FORMAT$("{} lap", lap), gx + gw - 38, INT(yy) - 14, 13, 0, 110, 116, 130
+    NEXT lap
+    IF nh >= 2 THEN
+        DrawCurve(hb, gx, gy, gw, gh, ymax, 90, 220, 120)
+        DrawCurve(hm, gx, gy, gw, gh, ymax, 255, 170, 70)
+    ENDIF
+    TXT "best", gx + 5, gy + 3, 13, 0, 90, 220, 120
+    TXT "average", gx + 45, gy + 3, 13, 0, 255, 170, 70
+
+    DrawBrain(t, lead, gx, gw, 345)
+    TXT "1-4 mode  +/- speed  F turbo  S/L save/load", gx, WIN_H - 40, 13, 0, 110, 116, 130
+    TXT "R restart  Esc quit", gx, WIN_H - 22, 13, 0, 110, 116, 130
+ENDSUB
+
+' One frame: track image, cars (progress order, leader last), leader rays + circle, side panel, flash message.
+EXPORT SUB DRAW(g AS MAP, t AS MAP, speed AS INTEGER, turbo AS INTEGER, flash$)
+    DIM e AS MAP = t{"env"}
+    GFX.DRAWIMAGE(g{"bg"}, 0, 0)
+    DrawCars(g, e)
+    DIM lead AS INTEGER = TRAINER.LEADER(t)
+    DrawLeader(t, e, lead)
+    DrawPanel(g, t, e, lead, speed, turbo)
+    IF flash$ <> "" THEN TXT flash$, 15, 12, 16, 0, 255, 255, 255
+ENDSUB
