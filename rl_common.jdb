@@ -327,7 +327,43 @@ ENDSUB
 ' backward pass: sc{"d<nl-1>"} must hold dLoss/d(raw output); fills the gradients of every layer into PGRAD
 ' (TORCH.PUTGRAD) for the pids of net. X is the same flat array that went into LOOP_FWD.
 EXPORT SUB LOOP_BWD(net AS MAP, sc AS MAP, X AS ARRAY, rows AS INTEGER)
+    LOOP_GRADS(net, sc, X, rows)
     DIM pids AS ARRAY = net{"pids"}
+    DIM sizes AS ARRAY = net{"sizes"}
+    DIM nl AS INTEGER = net{"nl"}
+    DIM l AS INTEGER = 0
+    DIM kin AS INTEGER = 0
+    DIM kout AS INTEGER = 0
+    DIM i AS INTEGER = 0
+    DIM j AS INTEGER = 0
+    DIM GW AS ARRAY = sc{"gw0"}
+    DIM GB AS ARRAY = sc{"gb0"}
+    DIM g2 AS ARRAY = TORCH.ZEROS_RC(1, 1)
+    DIM gb2 AS ARRAY = TORCH.ZEROS_RC(1, 1)
+    FOR l = nl - 1 TO 0 STEP -1
+        kin = CINT(sizes[l])
+        kout = CINT(sizes[l + 1])
+        GW = sc{"gw" + STR$(l)}
+        GB = sc{"gb" + STR$(l)}
+        ' hand the gradients to TORCH as 2-D arrays (tiny)
+        g2 = TORCH.ZEROS_RC(kin, kout)
+        gb2 = TORCH.ZEROS_RC(1, kout)
+        FOR i = 0 TO kin - 1
+            FOR j = 0 TO kout - 1
+                g2[i, j] = GW[i * kout + j]
+            NEXT j
+        NEXT i
+        FOR j = 0 TO kout - 1
+            gb2[0, j] = GB[j]
+        NEXT j
+        TORCH.PUTGRAD(pids[2 * l], g2)
+        TORCH.PUTGRAD(pids[2 * l + 1], gb2)
+    NEXT l
+ENDSUB
+
+' the same backward pass, leaving the gradients flat in sc{"gw<l>"} / sc{"gb<l>"} (no array is created: PPO
+' runs this 52 times per iteration and applies Adam to the flat arrays itself)
+EXPORT SUB LOOP_GRADS(net AS MAP, sc AS MAP, X AS ARRAY, rows AS INTEGER)
     DIM sizes AS ARRAY = net{"sizes"}
     DIM nl AS INTEGER = net{"nl"}
     DIM l AS INTEGER = 0
@@ -343,8 +379,6 @@ EXPORT SUB LOOP_BWD(net AS MAP, sc AS MAP, X AS ARRAY, rows AS INTEGER)
     DIM dprev AS ARRAY = X
     DIM aprev AS ARRAY = X
     DIM hp AS INTEGER = 0
-    DIM g2 AS ARRAY = TORCH.ZEROS_RC(1, 1)
-    DIM gb2 AS ARRAY = TORCH.ZEROS_RC(1, 1)
     FOR l = nl - 1 TO 0 STEP -1
         kin = CINT(sizes[l])
         kout = CINT(sizes[l + 1])
@@ -363,18 +397,22 @@ EXPORT SUB LOOP_BWD(net AS MAP, sc AS MAP, X AS ARRAY, rows AS INTEGER)
         GW = sc{"gw" + STR$(l)}
         GB = sc{"gb" + STR$(l)}
         LayerBwd(src, wf, dZ, GW, GB, dprev, aprev, rows, kin, kout, hp)
-        ' hand the gradients to TORCH as 2-D arrays (tiny)
-        g2 = TORCH.ZEROS_RC(kin, kout)
-        gb2 = TORCH.ZEROS_RC(1, kout)
-        FOR i = 0 TO kin - 1
-            FOR j = 0 TO kout - 1
-                g2[i, j] = GW[i * kout + j]
-            NEXT j
-        NEXT i
-        FOR j = 0 TO kout - 1
-            gb2[0, j] = GB[j]
-        NEXT j
-        TORCH.PUTGRAD(pids[2 * l], g2)
-        TORCH.PUTGRAD(pids[2 * l + 1], gb2)
     NEXT l
+ENDSUB
+
+' in-place Fisher-Yates shuffle of perm[0 .. n-1] to a uniformly random permutation of 0 .. n-1 (torch.randperm).
+' Scalar loop with RNG.NEXT: argsort of RNG.FILL would allocate (and under -c leak) several n-sized temporaries.
+EXPORT SUB PERMUTE(perm AS ARRAY, n AS INTEGER, gen AS INTEGER)
+    DIM i AS INTEGER = 0
+    DIM j AS INTEGER = 0
+    DIM tmp AS DOUBLE = 0.0
+    FOR i = 0 TO n - 1
+        perm[i] = i
+    NEXT i
+    FOR i = n - 1 TO 1 STEP -1
+        j = INT(RNG.NEXT(gen) * (i + 1))
+        tmp = perm[i]
+        perm[i] = perm[j]
+        perm[j] = tmp
+    NEXT i
 ENDSUB

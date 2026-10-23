@@ -1,0 +1,124 @@
+' PPO check: the scalar-loop loss, gradients and Adam step (used under -c) must equal the TORCH tape ones
+' (used by the interpreter) on a random rollout buffer, including ratio == 1 ties and clipped samples.
+'   tools/jd.sh run tests/ppo_grad.jdb && tools/jd.sh native tests/ppo_grad.jdb
+IMPORT TRACK, ENV, PPO, RL_COMMON, TORCH
+DIM tr AS MAP = TRACK.NEW("hard")
+DIM e AS MAP = ENV.NEW(tr, 4, 900, 0)
+DIM t AS MAP = PPO.NEW(e, 0)
+DIM buf AS MAP = t{"buf"}
+DIM net AS MAP = t{"model"}
+DIM gen AS INTEGER = RNG.NEW(7)
+DIM rows AS INTEGER = 128 * 4
+DIM bo AS ARRAY = buf{"obs"}
+DIM ba AS ARRAY = buf{"act"}
+DIM br AS ARRAY = buf{"ret"}
+DIM adv AS ARRAY = t{"adv"}
+DIM olp AS ARRAY = t{"logp"}
+DIM i AS INTEGER = 0
+FOR i = 0 TO LEN(bo) - 1
+    bo[i] = RNG.NEXT(gen)
+NEXT i
+FOR i = 0 TO LEN(ba) - 1
+    ba[i] = RNG.NEXT(gen) * 2 - 1
+NEXT i
+FOR i = 0 TO rows - 1
+    br[i] = RNG.NEXT(gen) * 40 - 20            ' large: the gradient norm exceeds 0.5, so clipping is exercised
+    adv[i] = RNG.NEXT(gen) * 2 - 1
+NEXT i
+' old log-probs: every third sample exactly the current policy (ratio 1: min() tie), the rest +-0.5 away
+' (ratio 0.6 .. 1.65: clipped on both sides)
+DIM ap AS ARRAY = t{"all_pids"}
+TORCH.RESET()
+DIM xa AS ARRAY = RL_COMMON.BUF_ACT(buf)
+DIM mean AS INTEGER = TORCH.TTANH(TORCH.MLP_FWD(net, TORCH.C(RL_COMMON.BUF_OBS(buf))))
+DIM lg AS INTEGER = TORCH.NORMAL_LOGP(TORCH.C(xa), mean, TORCH.P(t{"log_std"}))
+DIM lv AS ARRAY = TORCH.VALUE(lg)
+FOR i = 0 TO rows - 1
+    IF i MOD 3 = 0 THEN
+        olp[i] = lv[i, 0]
+    ELSE
+        olp[i] = lv[i, 0] + RNG.NEXT(gen) - 0.5
+    ENDIF
+NEXT i
+TORCH.RESET()
+' a minibatch of 300 of the 512 samples, shuffled
+DIM perm AS ARRAY = t{"perm"}
+RL_COMMON.PERMUTE(perm, rows, gen)
+DIM m AS INTEGER = 300
+DIM s AS INTEGER = 100
+DIM saved AS MAP = {}
+DIM w0 AS MAP = {}
+DIM g AS ARRAY = TORCH.PGRAD(ap[0])
+FOR i = 0 TO LEN(ap) - 1
+    w0{STR$(i)} = TORCH.PVAL(ap[i]) + 0
+NEXT i
+' --- tape
+DIM lt AS DOUBLE = PPO.GradsTape(t, perm, s, m)
+FOR i = 0 TO LEN(ap) - 1
+    g = TORCH.PGRAD(ap[i])
+    saved{STR$(i)} = g + 0
+NEXT i
+DIM nrm AS DOUBLE = TORCH.CLIP_GRAD_NORM(ap, 0.5)
+TORCH.ADAM_STEP(t{"opt"})
+DIM w1 AS MAP = {}
+FOR i = 0 TO LEN(ap) - 1
+    w1{STR$(i)} = TORCH.PVAL(ap[i]) + 0
+    TORCH.PUT(ap[i], w0{STR$(i)} + 0)               ' back to the initial weights
+NEXT i
+' --- loops
+DIM ll AS DOUBLE = PPO.GradsLoop(t, perm, s, m)
+DIM sca AS MAP = t{"sca"}
+DIM scc AS MAP = t{"scc"}
+DIM glog AS ARRAY = t{"glog"}
+DIM maxd AS DOUBLE = 0.0
+DIM d AS DOUBLE = 0.0
+DIM sv AS ARRAY = g
+DIM gf AS ARRAY = ZEROS([1])
+DIM sc AS MAP = sca
+DIM nn AS INTEGER = 0
+DIM l AS INTEGER = 0
+DIM base AS INTEGER = 0
+DIM k AS INTEGER = 0
+FOR nn = 0 TO 1
+    IF nn = 0 THEN
+        sc = sca
+        base = 0
+    ELSE
+        sc = scc
+        base = 6
+    ENDIF
+    FOR l = 0 TO 2
+        sv = saved{STR$(base + 2 * l)}
+        gf = sc{"gw" + STR$(l)}
+        d = MAX(ABS(RESHAPE(sv, [LEN(gf)]) - gf))
+        IF d > maxd THEN maxd = d
+        sv = saved{STR$(base + 2 * l + 1)}
+        gf = sc{"gb" + STR$(l)}
+        d = MAX(ABS(RESHAPE(sv, [LEN(gf)]) - gf))
+        IF d > maxd THEN maxd = d
+    NEXT l
+NEXT nn
+sv = saved{"12"}
+FOR k = 0 TO 1
+    d = ABS(sv[0, k] - glog[k])
+    IF d > maxd THEN maxd = d
+NEXT k
+DIM nl AS DOUBLE = PPO.LoopStep(t)
+DIM maxw AS DOUBLE = 0.0
+DIM wa AS ARRAY = g
+DIM wb AS ARRAY = g
+FOR i = 0 TO LEN(ap) - 1
+    wa = TORCH.PVAL(ap[i])
+    wb = w1{STR$(i)}
+    d = MAX(ABS(wa - wb))
+    IF d > maxw THEN maxw = d
+NEXT i
+PRINT "loss tape "; lt; "  loop "; ll
+PRINT "grad norm tape "; nrm; "  loop "; nl
+PRINT "max grad diff "; FORMAT$("{:.3e}", maxd)
+PRINT "max weight diff after clip + Adam step "; FORMAT$("{:.3e}", maxw)
+IF ABS(lt - ll) < 0.000001 AND maxd < 0.000001 AND ABS(nrm - nl) < 0.000001 AND maxw < 0.000001 THEN
+    PRINT "PASS"
+ELSE
+    PRINT "FAIL"
+ENDIF
