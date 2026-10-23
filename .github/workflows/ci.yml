@@ -25,32 +25,42 @@ jobs:
         timeout-minutes: 5
         run: cd "$PY_PROJECT" && python -c "import track, env, brain; print('genome_size', brain.genome_size())"
 
-  jdbasic-wine:
-    # jdBasic.exe under Wine. Currently crashes at startup in Wine 9.0 (see ci/README.md), so this job is
-    # advisory (job-level continue-on-error; its check still reports the real result) until that is solved; flip it to required once it passes.
+  jdbasic:
+    # jdBasic built natively on Linux from upstream source (ci/Dockerfile, pinned JDBASIC_REF), interpreter and
+    # the -c native compiler (LLVM). The container's --memory is the hard cap.
     runs-on: [self-hosted, jdbasic]
-    timeout-minutes: 30
-    continue-on-error: true
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         timeout-minutes: 5
       - name: Clone the Python original
         timeout-minutes: 5
         run: git clone --depth 1 "$PY_REPO" "$RUNNER_TEMP/py" && echo "PY_PROJECT=$RUNNER_TEMP/py" >> "$GITHUB_ENV"
-      - name: Wine smoke test (jdBasic starts)
+      - name: jdBasic smoke test (version, 6*7)
         timeout-minutes: 2
         run: |
+          cat /opt/jdbasic/REF
           echo 'PRINT 6*7' > "$RUNNER_TEMP/t.jdb"
           JD_TIME=60 tools/jd.sh run "$RUNNER_TEMP/t.jdb"
-      - name: torch_gradcheck
+      - name: torch_gradcheck (interpreter)
         timeout-minutes: 6
         run: JD_TIME=240 tools/jd.sh run tests/torch_gradcheck.jdb
-      - name: track_check
+      - name: torch_gradcheck (native -c)
         timeout-minutes: 6
-        run: JD_TIME=240 tools/jd.sh run tests/track_check.jdb
+        run: JD_TIME=240 tools/jd.sh native tests/torch_gradcheck.jdb
+      - name: track_check (interpreter + native)
+        timeout-minutes: 6
+        run: |
+          JD_TIME=240 tools/jd.sh run tests/track_check.jdb
+          JD_TIME=240 tools/jd.sh native tests/track_check.jdb
+      - name: reinforce_grad (interpreter + native)
+        timeout-minutes: 6
+        run: |
+          JD_TIME=240 tools/jd.sh run tests/reinforce_grad.jdb
+          JD_TIME=240 tools/jd.sh native tests/reinforce_grad.jdb
       - name: env_parity
-        timeout-minutes: 6
-        run: python tests/env_parity.py
+        timeout-minutes: 10
+        run: python tests/env_parity.py && python tests/env_parity.py --native
       - name: brain_parity
-        timeout-minutes: 6
-        run: python tests/brain_parity.py
+        timeout-minutes: 10
+        run: python tests/brain_parity.py && python tests/brain_parity.py --native
