@@ -105,3 +105,12 @@ Works interpreted and `-c`. Screenshot (evolution, gen 13): `assets/shot.png`; `
 Test without a window: `python tests/gui_pixels.py [--native]` (pre-rendered road vs numpy, exact up to the start line); the GUI itself is not in CI (needs a display).
 GFX notes: `LINE matrix, colours` needs an Nx3 colour matrix (inline r,g,b are ignored in the matrix form); `EXIT SUB` is a parse error (use RETURN); identifiers are
 case-insensitive, `W` and `w` collided in a loop; no hidden-window mode, so `--shot` / `--record` still open a window; no resize, so frames are 1400x700.
+
+## Bench (issue #27, `bench.jdb`, jdBasic Build 102, 200 cars, hard track, ms per call)
+| op | interpreted | native -c | speedup |
+|---|---|---|---|
+| BRAIN.FORWARD | 16.9 | 2.10 | 8x |
+| ENV.RAY_DISTANCES | 31.1 | 1.19 | 26x |
+| ENV.TICK (full) | 34.9 | 1.32 | 26x |
+| EVOLUTION.ADVANCE (1 tick) | 50.2 | 3.33 | 15x |
+Run: `tools/jd.sh run bench.jdb 3 interp` / `tools/jd.sh native bench.jdb 20 native`; writes `assets/bench_<mode>.json`. PPO/DQN update timings still to add.

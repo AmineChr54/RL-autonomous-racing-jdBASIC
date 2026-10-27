@@ -1,0 +1,60 @@
+' bench.jdb: ms per call for the hot paths, 200 cars, hard track. Run both backends:
+'   tools/jd.sh run bench.jdb [reps]      tools/jd.sh native bench.jdb [reps]
+' Prints a table and writes assets/bench_<mode>.json (mode = "native" or "interp", first CLI arg after reps).
+IMPORT TRACK, ENV, BRAIN, EVOLUTION
+DIM reps AS INTEGER = 20
+IF LEN(OS.ARGS()) > 1 THEN reps = CINT(VAL(OS.ARGS()[1]))
+DIM mode$ = "native"
+IF LEN(OS.ARGS()) > 2 THEN mode$ = OS.ARGS()[2]
+
+DIM tr AS MAP = TRACK.NEW("hard")
+DIM e AS MAP = ENV.NEW(tr, 200, 900, 0)
+DIM gen AS INTEGER = RNG.NEW(1)
+DIM g AS ARRAY = BRAIN.RANDOM_GENOMES(200, gen)
+DIM br AS MAP = BRAIN.PREP(g)
+DIM obs AS ARRAY = ENV.RESET(e)
+DIM act AS ARRAY = BRAIN.FORWARD(br, obs)
+DIM ev AS MAP = EVOLUTION.NEW(e, 0)
+DIM i AS INTEGER = 0
+DIM dummy AS INTEGER = 0
+DIM t0 AS DOUBLE = 0.0
+DIM tEnv AS DOUBLE = 0.0
+DIM tBrain AS DOUBLE = 0.0
+DIM tRays AS DOUBLE = 0.0
+DIM tEvo AS DOUBLE = 0.0
+
+t0 = TICK()
+FOR i = 1 TO reps
+    act = BRAIN.FORWARD(br, obs)
+NEXT i
+tBrain = (TICK() - t0) / reps
+
+t0 = TICK()
+FOR i = 1 TO reps
+    ENV.RAY_DISTANCES(e)
+NEXT i
+tRays = (TICK() - t0) / reps
+
+t0 = TICK()
+FOR i = 1 TO reps
+    obs = ENV.TICK(e, act)
+NEXT i
+tEnv = (TICK() - t0) / reps
+
+t0 = TICK()
+FOR i = 1 TO reps
+    dummy = EVOLUTION.ADVANCE(ev)
+NEXT i
+tEvo = (TICK() - t0) / reps
+
+PRINT "mode "; mode$; "  reps "; reps; "  cars 200"
+PRINT "BRAIN.FORWARD      "; FORMAT$("{:.3f}", tBrain); " ms"
+PRINT "ENV.RAY_DISTANCES  "; FORMAT$("{:.3f}", tRays); " ms"
+PRINT "ENV.TICK (full)    "; FORMAT$("{:.3f}", tEnv); " ms"
+PRINT "EVOLUTION.ADVANCE  "; FORMAT$("{:.3f}", tEvo); " ms   (one tick incl. brain+env)"
+DIM js$ = "{" + CHR$(34) + "mode" + CHR$(34) + ":" + CHR$(34) + mode$ + CHR$(34) + ","
+js$ = js$ + CHR$(34) + "brain_forward_ms" + CHR$(34) + ":" + FORMAT$("{:.4f}", tBrain) + ","
+js$ = js$ + CHR$(34) + "ray_distances_ms" + CHR$(34) + ":" + FORMAT$("{:.4f}", tRays) + ","
+js$ = js$ + CHR$(34) + "env_tick_ms" + CHR$(34) + ":" + FORMAT$("{:.4f}", tEnv) + ","
+js$ = js$ + CHR$(34) + "evo_advance_ms" + CHR$(34) + ":" + FORMAT$("{:.4f}", tEvo) + "}" + CHR$(10)
+TXTWRITER "assets/bench_" + mode$ + ".json", js$
