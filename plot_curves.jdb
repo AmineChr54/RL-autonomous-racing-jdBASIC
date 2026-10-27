@@ -1,0 +1,107 @@
+' plot_curves.jdb (port of plot_curves.py): learning curves of the four methods, hard track, 200 cars.
+'   tools/jd.sh native plot_curves.jdb train evolution 60     appends one line to assets/curves.csv
+'   tools/jd.sh run    plot_curves.jdb plot                   assets/curves.csv -> assets/curves.svg + summary
+' CSV line: mode,half_lap_iteration,track_length,best1;best2;..,mean1;mean2;..
+' One method per process so each run stays under the memory cap.
+IMPORT TRACK, TRAINER
+
+DIM cmd$ = OS.ARGS()[1]
+
+FUNC Join$(a AS ARRAY) AS STRING
+    DIM out$ = ""
+    DIM i AS INTEGER = 0
+    FOR i = 0 TO LEN(a) - 1
+        IF i > 0 THEN out$ = out$ + ";"
+        out$ = out$ + FORMAT$("{:.1f}", a[i])
+    NEXT i
+    RETURN out$
+ENDFUNC
+
+SUB Train(mode$, iters AS INTEGER)
+    DIM tr AS MAP = TRACK.NEW("hard")
+    DIM t AS MAP = TRAINER.NEW(mode$, tr, 200, 900, 0)
+    DIM hm AS ARRAY = [0]
+    DIM hb AS ARRAY = [0]
+    DIM half AS INTEGER = 0
+    DIM tl AS DOUBLE = tr{"length"}
+    DIM t0 AS DOUBLE = TICK()
+    WHILE t{"generation"} <= iters
+        IF TRAINER.ADVANCE(t) = 1 THEN
+            hm = t{"hist_mean"}
+            IF half = 0 AND hm[LEN(hm) - 1] >= tl / 2 THEN half = LEN(hm)
+            PRINT mode$; " iter "; LEN(hm); "  mean "; INT(hm[LEN(hm) - 1]); "  ["; INT((TICK() - t0) / 1000); " s]"
+        ENDIF
+    WEND
+    hb = t{"hist_best"}
+    hm = t{"hist_mean"}
+    DIM line$ = mode$ + "," + STR$(half) + "," + FORMAT$("{:.1f}", tl) + "," + Join$(hb) + "," + Join$(hm) + CHR$(10)
+    TXTWRITER "assets/curves.csv", line$, TRUE
+ENDSUB
+
+IF cmd$ = "train" THEN
+    Train(OS.ARGS()[2], CINT(VAL(OS.ARGS()[3])))
+ELSEIF cmd$ = "plot" THEN
+    DIM rows AS ARRAY = SPLIT(TXTREADER$("assets/curves.csv"), CHR$(10))
+    DIM cols AS ARRAY = ["#1f77b4", "#d62728", "#2ca02c", "#9467bd"]
+    DIM W AS INTEGER = 900
+    DIM H AS INTEGER = 520
+    DIM svg$ = "<svg xmlns=" + CHR$(34) + "http://www.w3.org/2000/svg" + CHR$(34) + " width=" + CHR$(34) + "900" + CHR$(34) + " height=" + CHR$(34) + "520" + CHR$(34) + " font-family=" + CHR$(34) + "sans-serif" + CHR$(34) + " font-size=" + CHR$(34) + "12" + CHR$(34) + ">" + CHR$(10)
+    svg$ = svg$ + "<rect width=" + CHR$(34) + "900" + CHR$(34) + " height=" + CHR$(34) + "520" + CHR$(34) + " fill=" + CHR$(34) + "#fff" + CHR$(34) + "/>" + CHR$(10)
+    DIM ymax AS DOUBLE = 1.0
+    DIM xmax AS INTEGER = 1
+    DIM r AS INTEGER = 0
+    DIM f AS ARRAY = ["a"]
+    DIM ys AS ARRAY = ["a"]
+    DIM k AS INTEGER = 0
+    FOR r = 0 TO LEN(rows) - 1
+        IF LEN(rows[r]) > 0 THEN
+            f = SPLIT(rows[r], ",")
+            ys = SPLIT(f[3], ";")
+            IF LEN(ys) > xmax THEN xmax = LEN(ys)
+            FOR k = 0 TO LEN(ys) - 1
+                IF VAL(ys[k]) > ymax THEN ymax = VAL(ys[k])
+            NEXT k
+        ENDIF
+    NEXT r
+    DIM x0 AS INTEGER = 70
+    DIM y0 AS INTEGER = 460
+    DIM pw AS INTEGER = 800
+    DIM ph AS INTEGER = 400
+    svg$ = svg$ + "<line x1=" + CHR$(34) + "70" + CHR$(34) + " y1=" + CHR$(34) + "460" + CHR$(34) + " x2=" + CHR$(34) + "870" + CHR$(34) + " y2=" + CHR$(34) + "460" + CHR$(34) + " stroke=" + CHR$(34) + "#333" + CHR$(34) + "/>" + CHR$(10)
+    svg$ = svg$ + "<line x1=" + CHR$(34) + "70" + CHR$(34) + " y1=" + CHR$(34) + "60" + CHR$(34) + " x2=" + CHR$(34) + "70" + CHR$(34) + " y2=" + CHR$(34) + "460" + CHR$(34) + " stroke=" + CHR$(34) + "#333" + CHR$(34) + "/>" + CHR$(10)
+    svg$ = svg$ + "<text x=" + CHR$(34) + "70" + CHR$(34) + " y=" + CHR$(34) + "30" + CHR$(34) + " font-size=" + CHR$(34) + "16" + CHR$(34) + ">Average / best distance per iteration (hard track, 200 cars) - jdBasic</text>" + CHR$(10)
+    svg$ = svg$ + "<text x=" + CHR$(34) + "420" + CHR$(34) + " y=" + CHR$(34) + "495" + CHR$(34) + ">iteration (max " + STR$(xmax) + ")</text>" + CHR$(10)
+    svg$ = svg$ + "<text x=" + CHR$(34) + "8" + CHR$(34) + " y=" + CHR$(34) + "64" + CHR$(34) + ">" + STR$(INT(ymax)) + " px</text>" + CHR$(10)
+    DIM pts$ = ""
+    DIM px AS DOUBLE = 0.0
+    DIM py AS DOUBLE = 0.0
+    DIM pass AS INTEGER = 0
+    DIM c$ = ""
+    DIM dash$ = ""
+    DIM nm AS INTEGER = 0
+    FOR r = 0 TO LEN(rows) - 1
+        IF LEN(rows[r]) > 0 THEN
+            f = SPLIT(rows[r], ",")
+            c$ = cols[nm MOD 4]
+            FOR pass = 0 TO 1
+                ys = SPLIT(f[3 + pass], ";")
+                pts$ = ""
+                FOR k = 0 TO LEN(ys) - 1
+                    px = x0 + pw * k / MAX([xmax - 1, 1])
+                    py = y0 - ph * VAL(ys[k]) / ymax
+                    pts$ = pts$ + FORMAT$("{:.1f},{:.1f} ", px, py)
+                NEXT k
+                dash$ = ""
+                IF pass = 0 THEN dash$ = " stroke-dasharray=" + CHR$(34) + "4 3" + CHR$(34)
+                svg$ = svg$ + "<polyline fill=" + CHR$(34) + "none" + CHR$(34) + " stroke=" + CHR$(34) + c$ + CHR$(34) + dash$ + " stroke-width=" + CHR$(34) + "2" + CHR$(34) + " points=" + CHR$(34) + pts$ + CHR$(34) + "/>" + CHR$(10)
+            NEXT pass
+            svg$ = svg$ + "<text x=" + CHR$(34) + "700" + CHR$(34) + " y=" + CHR$(34) + STR$(80 + nm * 18) + CHR$(34) + " fill=" + CHR$(34) + c$ + CHR$(34) + ">" + f[0] + " (mean solid, best dashed)</text>" + CHR$(10)
+            ys = SPLIT(f[4], ";")
+            PRINT RPAD$(f[0], 10); " half lap at iteration "; f[1]; " (0 = never);  final avg "; INT(VAL(ys[LEN(ys) - 1])); " px, best "; INT(VAL(SPLIT(f[3], ";")[LEN(ys) - 1])); " px"
+            nm = nm + 1
+        ENDIF
+    NEXT r
+    svg$ = svg$ + "</svg>" + CHR$(10)
+    TXTWRITER "assets/curves.svg", svg$
+    PRINT "wrote assets/curves.svg"
+ENDIF
