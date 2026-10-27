@@ -113,4 +113,4 @@ case-insensitive, `W` and `w` collided in a loop; no hidden-window mode, so `--s
 | ENV.RAY_DISTANCES | 31.1 | 1.19 | 26x |
 | ENV.TICK (full) | 34.9 | 1.32 | 26x |
 | EVOLUTION.ADVANCE (1 tick) | 50.2 | 3.33 | 15x |
-Run: `tools/jd.sh run bench.jdb 3 interp` / `tools/jd.sh native bench.jdb 20 native`; writes `assets/bench_<mode>.json`. PPO/DQN update timings still to add.
+Run: `tools/jd.sh run bench.jdb 3 interp` / `tools/jd.sh native bench.jdb 20 native`; writes `assets/bench_<mode>.json`. Per-iteration training times are in the smoke-test sections (evolution 5.2 s/gen, REINFORCE 5.9 s/iter native; DQN ~80 s/iter, #46).
