@@ -47,6 +47,15 @@ Hard track, 200 cars, seed 0, native. Half a lap = 1593 px. Chart: `assets/curve
 
 PPO learns fastest. DQN is too slow (about 45 s/iteration) and too short a run to say anything yet (#46). Python README numbers: not compared yet.
 
+### Seed-to-seed variance (evolution, 30 generations, 8 seeds in parallel, `par_seeds.jdb`)
+
+| seed | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
+|---|---|---|---|---|---|---|---|---|
+| half-lap generation | 26 | 25 | 23 | 25 | 25 | 25 | 19 | 30 |
+| final mean (px) | 2776 | 3525 | 3590 | 3148 | 2903 | 3481 | 3495 | 1986 |
+
+Final mean 3113 +- 513 px; every seed reaches half a lap, on average at generation 24.8 (range 19-30). Seed 0 matches the single-run curve (26). The 8 trainings took 263 s in parallel (about 4.7x faster than one after another), peak 550 MB.
+
 ## What replaced what
 
 | Python | jdBasic |

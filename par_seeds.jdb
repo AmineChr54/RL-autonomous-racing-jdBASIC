@@ -15,11 +15,20 @@ FUNC TrainSeed(m AS INTEGER, iters AS INTEGER, seed AS INTEGER) AS DOUBLE
     DIM tr AS MAP = TRACK.NEW("hard")
     DIM t AS MAP = TRAINER.NEW(mode$, tr, 200, 900, seed)
     DIM hm AS ARRAY = [0]
+    DIM half AS INTEGER = 0
+    DIM nh AS INTEGER = 0
+    DIM tl AS DOUBLE = tr{"length"}
     WHILE t{"generation"} <= iters
         DIM dummy AS INTEGER = TRAINER.ADVANCE(t)
+        hm = t{"hist_mean"}
+        nh = LEN(hm)
+        IF half = 0 AND nh > 0 THEN
+            IF hm[nh - 1] >= tl / 2 THEN half = nh
+        ENDIF
     WEND
     hm = t{"hist_mean"}
-    RETURN hm[LEN(hm) - 1]
+    ' one number travels back through the pool: half-lap iteration (0 = never) * 100000 + final mean distance
+    RETURN half * 100000 + INT(hm[LEN(hm) - 1])
 ENDFUNC
 
 ASYNC FUNC Worker(jobs, results, m, iters)
@@ -49,7 +58,29 @@ FOR w = 1 TO nw
     POOL.SPAWN(p, Worker(POOL.JOBS(p), POOL.RESULTS(p), m, iters))
 NEXT w
 PRINT "finished "; POOL.GATHER(p, 1800000, FALSE); " of "; nw
-PRINT "final mean distance per seed: "; POOL.VALUES(p)
+DIM vals AS ARRAY = POOL.VALUES(p)
+DIM half AS DOUBLE = 0.0
+DIM fin AS DOUBLE = 0.0
+DIM sh AS DOUBLE = 0.0
+DIM sf AS DOUBLE = 0.0
+DIM ss AS DOUBLE = 0.0
+DIM never AS INTEGER = 0
+PRINT "seed  half-lap iteration  final mean (px)"
+FOR w = 0 TO nw - 1
+    half = INT(vals[w] / 100000)
+    fin = vals[w] - half * 100000
+    PRINT FORMAT$("{:4d}  {:19d}  {:9.0f}", w, INT(half), fin)
+    IF half = 0 THEN
+        never = never + 1
+    ELSE
+        sh = sh + half
+    ENDIF
+    sf = sf + fin
+    ss = ss + fin * fin
+NEXT w
+DIM mf AS DOUBLE = sf / nw
+PRINT FORMAT$("final mean over seeds: {:.0f} +- {:.0f} px;  seeds that never reached half a lap: {}", mf, SQR(MAX([ss / nw - mf * mf, 0])), never)
+IF nw > never THEN PRINT FORMAT$("mean half-lap iteration (of those that did): {:.1f}", sh / (nw - never))
 PRINT "states: "; POOL.STATES(p)
 FOR w = 0 TO nw - 1
     IF POOL.STATE$(p, w) <> "ok" THEN PRINT "  job "; w; ": "; POOL.REASON$(p, w)
