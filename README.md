@@ -100,6 +100,15 @@ The planned entry point mirrors the Python one: `jdBasic main.jdb --mode ppo --t
 
 ![GUI screenshot](assets/shot.png)
 
+## Full demo, one command
+
+```bash
+tools/demo.sh quick    # about 3 minutes: tests, leak guard, a short training, benchmark, playable screenshot
+tools/demo.sh full     # about 40 minutes: plus the four learning curves and the pitch film
+```
+
+Every step runs under the memory cap of `tools/jd.sh`, one jdBasic process at a time.
+
 ## Pitch video
 
 ![pitch](docs/gifs/pitch.gif)
