@@ -116,6 +116,22 @@ ENDIF
 DIM gi AS INTEGER = 0
 DIM sw AS DOUBLE = 0.0
 DIM txt$ = ""
+IF ntop > 0 THEN best$ = FORMAT$("{:.2f} s", top[0] / LAP_TICKS_PER_SEC)
+DIM gpath$ = "saves/ghost_" + trackname$ + ".txt"
+DIM gf AS ARRAY = ["a"]
+' the ghost of the best lap survives restarts: one "x,y,heading" line per tick
+IF FILE.EXISTS(gpath$) THEN
+    lines = SPLIT(TXTREADER$(gpath$), CHR$(10))
+    FOR li = 0 TO LEN(lines) - 1
+        IF LEN(lines[li]) > 0 AND glen < MAXT THEN
+            gf = SPLIT(lines[li], ",")
+            gx[glen] = VAL(gf[0])
+            gy[glen] = VAL(gf[1])
+            gth[glen] = VAL(gf[2])
+            glen = glen + 1
+        ENDIF
+    NEXT li
+ENDIF
 
 WHILE running = 1
     f0 = TICK()
@@ -192,6 +208,11 @@ WHILE running = 1
                     gy[gi] = ry[gi]
                     gth[gi] = rth[gi]
                 NEXT gi
+                txt$ = ""
+                FOR gi = 0 TO ticks - 1
+                    txt$ = txt$ + FORMAT$("{:.3f},{:.3f},{:.5f}", gx[gi], gy[gi], gth[gi]) + CHR$(10)
+                NEXT gi
+                TXTWRITER gpath$, txt$
             ENDIF
             txt$ = ""
             FOR li = 0 TO ntop - 1

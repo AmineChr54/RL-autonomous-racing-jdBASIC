@@ -122,7 +122,7 @@ tools/jd.sh native train_brain.jdb 25     # optional: retrain the four opponents
 tools/jd.sh run playable.jdb [easy|hard]   # arrows / WASD to drive, R restart, Esc quit (hard by default)
 ```
 
-You race an evolved brain on the hard track; the first car over one lap wins and a crash ends your run. Keys 1-4 pick the opponent: ROOKIE, PRO, EXPERT, CHAMPION are the best brains of evolution generation 3, 8, 15 and 25 (1192, 1965, 4902 and 5795 px in training; the champion laps in about 8 s). The side panel keeps your top-5 laps and a ghost replays your best one. The brains were evolved on the hard track only: on `easy` every opponent crashes at the same sharp bend (62% of the lap), so `easy` is a track for you, not a fair race.
+You race an evolved brain on the hard track; the first car over one lap wins and a crash ends your run. Keys 1-4 pick the opponent: ROOKIE, PRO, EXPERT, CHAMPION are the best brains of evolution generation 3, 8, 15 and 25 (1192, 1965, 4902 and 5795 px in training; the champion laps in about 8 s). The side panel keeps your top-5 laps and a ghost replays your best one; both are saved in `saves/` and survive restarts. The brains were evolved on the hard track only: on `easy` every opponent crashes at the same sharp bend (62% of the lap), so `easy` is a track for you, not a fair race.
 ![playable screenshot](assets/playable_shot.png)
 
 ## Tests
