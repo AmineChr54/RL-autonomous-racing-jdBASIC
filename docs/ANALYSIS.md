@@ -55,3 +55,7 @@ Against the Python original (numpy, `tests/py_bench.py`) the compiled port is st
 A jdBasic with leak-free array temporaries and faster array kernels would shrink the port (the scalar-loop learners could go
 back to the tape) and make DQN practical. Achim reports the leaks fixed in Build 109 / v1.2.0; that is the first thing to
 re-measure once the new build is installed. Draft upstream reports: `docs/UPSTREAM_REPORTS.md`.
+
+## 7. Generalisation
+
+The evolved champion (1.8 laps on the hard track) does not transfer: on the easy track the champion crashes at 62% of the lap, at one sharp bend, and so do the other brains started there (`playable.jdb demo 400 out.png 3 easy`). Seven rays and a speed reading are enough to follow the track it was evolved on, but evolution only optimised for that one layout. Training on both tracks, or on randomised tracks, is the obvious next experiment.

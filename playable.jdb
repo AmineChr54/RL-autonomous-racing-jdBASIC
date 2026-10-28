@@ -1,6 +1,6 @@
 ' playable.jdb - race the best evolved brain yourself (issue #56). Interpreted (needs the GFX window):
-'   tools/jd.sh run playable.jdb                       arrow keys / WASD: steer + throttle, R restart, Esc quit
-'   tools/jd.sh run playable.jdb demo 400 out.png [1-4 -> 0-3]   autopilot for the human car, opponent level 0-3 (default 3)
+'   tools/jd.sh run playable.jdb [easy|hard]           arrow keys / WASD: steer + throttle, R restart, Esc quit (default track: hard)
+'   tools/jd.sh run playable.jdb demo 400 out.png [level 0-3] [easy|hard]   autopilot for the human car (default: level 3, hard)
 ' Opponents (keys 1-4, made by train_brain.jdb): ROOKIE, PRO, EXPERT, CHAMPION = the best brain of evolution generation 3, 8, 15, 25.
 ' First car over one lap wins; a crash ends your run.
 IMPORT TRACK, ENV, BRAIN, GUI
@@ -15,15 +15,23 @@ ENDSUB
 DIM demo AS INTEGER = 0
 DIM demoTicks AS INTEGER = 0
 DIM shot$ = ""
+DIM trackname$ = "hard"
 IF LEN(OS.ARGS()) > 1 THEN
     IF OS.ARGS()[1] = "demo" THEN
         demo = 1
         demoTicks = CINT(VAL(OS.ARGS()[2]))
         shot$ = OS.ARGS()[3]
+        IF LEN(OS.ARGS()) > 5 THEN trackname$ = OS.ARGS()[5]
+    ELSE
+        trackname$ = OS.ARGS()[1]
     ENDIF
 ENDIF
+IF trackname$ <> "easy" AND trackname$ <> "hard" THEN
+    PRINT "playable: track must be easy or hard"
+    END 2
+ENDIF
 
-DIM tr AS MAP = TRACK.NEW("hard")
+DIM tr AS MAP = TRACK.NEW(trackname$)
 DIM tl AS DOUBLE = tr{"length"}
 DIM files$ = ["assets/brain_rookie.json", "assets/brain_pro.json", "assets/brain_expert.json", "assets/best_brain.json"]
 DIM names$ = ["ROOKIE", "PRO", "EXPERT", "CHAMPION"]
@@ -96,8 +104,8 @@ DIM ntop AS INTEGER = 0
 DIM lines AS ARRAY = ["a"]
 DIM li AS INTEGER = 0
 MKDIR "saves"
-IF FILE.EXISTS("saves/best_laps.txt") THEN
-    lines = SPLIT(TXTREADER$("saves/best_laps.txt"), CHR$(10))
+IF FILE.EXISTS("saves/best_laps_" + trackname$ + ".txt") THEN
+    lines = SPLIT(TXTREADER$("saves/best_laps_" + trackname$ + ".txt"), CHR$(10))
     FOR li = 0 TO LEN(lines) - 1
         IF LEN(lines[li]) > 0 AND ntop < 5 THEN
             top[ntop] = VAL(lines[li])
@@ -189,7 +197,7 @@ WHILE running = 1
             FOR li = 0 TO ntop - 1
                 txt$ = txt$ + STR$(INT(top[li])) + CHR$(10)
             NEXT li
-            TXTWRITER "saves/best_laps.txt", txt$
+            TXTWRITER "saves/best_laps_" + trackname$ + ".txt", txt$
         ENDIF
     ENDIF
     vx[0] = hx[0]
@@ -216,7 +224,7 @@ WHILE running = 1
     GUI.TXT "YOU", hx[0] - 10, hy[0] - 26, 14, 1, 255, 255, 255
     GUI.TXT "AI", ax[0] - 6, ay[0] - 26, 14, 1, 120, 200, 255
     RECT px, 0, GUI.PANEL, GUI.WIN_H, TRUE, 22, 24, 29
-    GUI.TXT "RACE THE AI", px + 15, 10, 22, 1, 255, 214, 102
+    GUI.TXT "RACE THE AI - " + UCASE$(trackname$), px + 15, 10, 22, 1, 255, 214, 102
     GUI.TXT FORMAT$("time   {:6.2f} s", ticks / LAP_TICKS_PER_SEC), px + 15, 50, 18, 0, 225, 228, 235
     GUI.TXT FORMAT$("you    {:4.0f}%  of a lap", MIN([hpr[0] / tl * 100, 999])), px + 15, 80, 16, 0, 255, 255, 255
     GUI.TXT FORMAT$("AI     {:4.0f}%  of a lap", MIN([apr[0] / tl * 100, 999])), px + 15, 100, 16, 0, 120, 200, 255
