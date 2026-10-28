@@ -1,0 +1,36 @@
+' TORCH.SAVE_JSON$ / LOAD_JSON round trip (works under -c since the flat format, issue #45; JSON.STRINGIFY$ keeps about 7 digits).
+'   tools/jd.sh run|native tests/torch_json.jdb
+IMPORT TORCH
+DIM gen AS INTEGER = RNG.NEW(3)
+DIM net AS MAP = TORCH.MLP_NEW([8, 12, 12, 2], gen)
+DIM pids AS ARRAY = TORCH.MLP_PIDS(net)
+DIM js$ = TORCH.SAVE_JSON$(pids)
+DIM before AS ARRAY = [0]
+DIM after AS ARRAY = [0]
+DIM want AS ARRAY = ZEROS([LEN(pids)])
+DIM i AS INTEGER = 0
+FOR i = 0 TO LEN(pids) - 1
+    before = TORCH.PVAL(pids[i])
+    want[i] = SUM(before)
+NEXT i
+' overwrite every parameter with zeros, then load
+FOR i = 0 TO LEN(pids) - 1
+    before = TORCH.PVAL(pids[i])
+    TORCH.PUT(pids[i], TORCH.ZEROS_RC(TORCH.NROWS(before), TORCH.NCOLS(before)))
+NEXT i
+TORCH.LOAD_JSON(pids, js$)
+DIM worst AS DOUBLE = 0.0
+DIM d AS DOUBLE = 0.0
+FOR i = 0 TO LEN(pids) - 1
+    after = TORCH.PVAL(pids[i])
+    d = ABS(SUM(after) - want[i])
+    IF d > worst THEN worst = d
+    IF TORCH.NROWS(after) * TORCH.NCOLS(after) < 1 THEN worst = 1
+NEXT i
+PRINT "json bytes "; LEN(js$); "  worst |sum(loaded) - sum(saved)| "; worst
+IF worst < 0.0001 THEN      ' JSON.STRINGIFY$ keeps about 7 significant digits
+    PRINT "PASS"
+ELSE
+    PRINT "FAIL"
+    END 1
+ENDIF

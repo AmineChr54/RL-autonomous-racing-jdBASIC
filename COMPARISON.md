@@ -110,7 +110,7 @@ PPO is both the fastest and the most consistent learner.
 12. `NOW_EPOCH()` has whole-second resolution under `-c` (#37).
 13. Interpreter: an `ASYNC FUNC` sees module CONSTs/globals as 0 (#38).
 14. `DF.WRITECSV` writes 6 significant digits (#39).
-15. `TORCH.LOAD_JSON` is broken under `-c` (#45).
+15. Arrays parsed from nested JSON (`JSON.PARSE$`) read as empty or zeros under `-c`, and segfault when passed on (#45). Worked around by saving flat number lists.
 16. GFX gaps found by the GUI port (#52).
 
 Achim reports these are fixed in Build 109 / v1.2.0; to be re-verified (see below).

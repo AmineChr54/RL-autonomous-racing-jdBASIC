@@ -75,7 +75,7 @@ Note: the builtin `STDEV` (used by `RL_COMMON.NORMALIZE_COL`) is the population 
 peak 129 MB, same numbers (3 iterations: best 424/384/504 px, loss 0.229/0.157/0.146, identical in both backends). Learning quality is not yet measured (needs hundreds of iterations at this speed, see #46).
 Like REINFORCE, the compiled path runs forward, target forward, gradients, clip, Adam and polyak as scalar loops over flat arrays (no array temporaries); the interpreter uses the tape.
 `tests/dqn_grad.jdb` checks both give the same loss and gradients (max diff 1.4e-17, both backends). The replay buffer is flat 1-D arrays (150000 transitions).
-`TORCH.LOAD_JSON` is broken under -c (#45), so `tests/dqn_smoke.jdb` only reloads the saved brain when interpreted.
+`TORCH.SAVE_JSON$` / `LOAD_JSON` now use flat number lists (nested JSON arrays are unusable under -c, #45): save and load work interpreted and native (`tests/torch_json.jdb`, DQN/PPO/REINFORCE smoke tests load natively). Brains saved in the old nested format do not load any more. `JSON.STRINGIFY$` keeps about 7 significant digits.
 
 ## trainer.jdb + main.jdb (issue #24)
 `trainer.jdb` = `make_trainer` (NEW/ADVANCE/LEADER/ACTS/SAVE_JSON$/LOAD_JSON, IF dispatch on `t{"mode"}`). `main.jdb` parses flags with `lib/cli.jdb`

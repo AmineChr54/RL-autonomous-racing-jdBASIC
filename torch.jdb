@@ -581,20 +581,35 @@ EXPORT SUB POLYAK(dst AS ARRAY, src AS ARRAY, tau)
     NEXT i
 ENDSUB
 
-' parameters as JSON {"0": [[...]], ...} in pid-list order, and back
 EXPORT FUNC SAVE_JSON$(pids AS ARRAY)
     DIM m = {}
+    DIM v AS ARRAY = [0]
     DIM i = 0
     FOR i = 0 TO LEN(pids) - 1
-        m{STR$(i)} = PVAL(pids[i])
+        v = PVAL(pids[i])
+        m{STR$(i)} = RESHAPE(v, [NROWS(v) * NCOLS(v)])       ' flat: nested JSON arrays are unusable under -c (issue #45)
     NEXT i
     RETURN JSON.STRINGIFY$(m)
 ENDFUNC
 
+' loads the flat format of SAVE_JSON$; the shapes come from the parameters that are already there
 EXPORT SUB LOAD_JSON(pids AS ARRAY, text$)
     DIM m = JSON.PARSE$(text$)
+    DIM cur AS ARRAY = [0]
+    DIM raw AS ARRAY = [0]
+    DIM nr AS INTEGER = 0
+    DIM nc AS INTEGER = 0
+    DIM k AS INTEGER = 0
     DIM i = 0
     FOR i = 0 TO LEN(pids) - 1
-        PUT(pids[i], m{STR$(i)} + 0)
+        cur = PVAL(pids[i])
+        nr = NROWS(cur)
+        nc = NCOLS(cur)
+        raw = m{STR$(i)}
+        DIM flat AS ARRAY = ZEROS([nr * nc])
+        FOR k = 0 TO nr * nc - 1
+            flat[k] = raw[k]
+        NEXT k
+        PUT(pids[i], RESHAPE(flat, [nr, nc]))
     NEXT i
 ENDSUB

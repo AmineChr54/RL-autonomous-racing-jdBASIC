@@ -48,6 +48,11 @@ jobs:
       - name: torch_gradcheck (native -c)
         timeout-minutes: 6
         run: JD_TIME=240 tools/jd.sh native tests/torch_gradcheck.jdb
+      - name: torch_json (save/load round trip, interpreter + native)
+        timeout-minutes: 6
+        run: |
+          JD_TIME=240 tools/jd.sh run tests/torch_json.jdb
+          JD_TIME=240 tools/jd.sh native tests/torch_json.jdb
       - name: track_check (interpreter + native)
         timeout-minutes: 6
         run: |
