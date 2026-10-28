@@ -2,9 +2,9 @@
 '   JD_MEM=1500 tools/jd.sh run pitch.jdb [out.gif]   default docs/gifs/pitch.gif; needs docs/gifs/{evolution,reinforce,ppo,dqn}.gif
 ' Interpreted: about 1 min, peak 1.4 GB. Native -c runs out of memory (whole-array temporaries are never freed, STATUS bug 9).
 ' Scenes (500 x 470, 16-colour palette of record.jdb):  1 title card   2 the four methods side by side (2 x 2)
-' 3 the learning curves drawing themselves (assets/curves.csv)   4 the numbers.
+' 3 the skill ladder (four brains race)   4 the learning curves drawing themselves (assets/curves.csv)   5 the numbers.
 ' Text is drawn with a built-in 3 x 5 pixel font. Frames are palette-index arrays written with GIF.WRITEINDEXED.
-IMPORT GIF
+IMPORT GIF, TRACK, ENV, BRAIN
 
 CONST W = 500
 CONST H = 470
@@ -166,7 +166,81 @@ c2 = [0]
 c3 = [0]
 src = [0]
 
-' ---- scene 3: learning curves draw themselves (30 frames), from assets/curves.csv (written by plot_curves.jdb)
+' ---- scene 3: the skill ladder, four brains (evolution generation 3, 8, 15, 25) race the same track (84 frames)
+DIM tr AS MAP = TRACK.NEW("hard")
+DIM mask AS ARRAY = tr{"mask"}
+DIM bg AS ARRAY = ZEROS([W * H])
+DIM x AS INTEGER = 0
+DIM y AS INTEGER = 0
+FOR y = 0 TO 349
+    FOR x = 0 TO 499
+        IF mask[(2 * y) * TRACK.WORLD_W + 2 * x] > 0 THEN bg[(y + 60) * W + x] = 1
+    NEXT x
+NEXT y
+DIM bfiles$ = ["assets/brain_rookie.json", "assets/brain_pro.json", "assets/brain_expert.json", "assets/best_brain.json"]
+DIM bnames$ = ["ROOKIE", "PRO", "EXPERT", "CHAMPION"]
+DIM bcols AS ARRAY = [C_RAY, C_GOLD, 7, C_LEAD]
+DIM envs AS MAP = {}
+DIM brs AS MAP = {}
+DIM obss AS MAP = {}
+DIM one AS ARRAY = [0]
+DIM e AS MAP = {}
+DIM brx AS MAP = {}
+DIM ob AS ARRAY = [0]
+DIM out AS ARRAY = [0]
+DIM act AS ARRAY = RESHAPE(ZEROS([2]), [1, 2])
+DIM ex AS ARRAY = [0]
+DIM ey AS ARRAY = [0]
+DIM eal AS ARRAY = [0]
+DIM q AS INTEGER = 0
+DIM tk AS INTEGER = 0
+DIM cx AS INTEGER = 0
+DIM cy AS INTEGER = 0
+DIM cc AS INTEGER = 0
+DIM dx AS INTEGER = 0
+DIM dy AS INTEGER = 0
+FOR q = 0 TO 3
+    e = ENV.NEW(tr, 1, 100000, q)
+    envs{STR$(q)} = e
+    one = JSON.PARSE$(TXTREADER$(bfiles$[q]))
+    brs{STR$(q)} = BRAIN.PREP(RESHAPE(one + 0, [1, BRAIN.GENOME_SIZE()]))
+    obss{STR$(q)} = ENV.RESET(e)
+NEXT q
+FOR f = 0 TO 83
+    FOR tk = 1 TO 6
+        FOR q = 0 TO 3
+            e = envs{STR$(q)}
+            brx = brs{STR$(q)}
+            ob = obss{STR$(q)}
+            out = BRAIN.FORWARD(brx, ob)
+            act[0, 0] = out[0, 0]
+            act[0, 1] = out[0, 1]
+            obss{STR$(q)} = ENV.TICK(e, act)
+        NEXT q
+    NEXT tk
+    fr = bg + 0
+    Centered(fr, "FOUR SKILL LEVELS - ONE TRACK", 14, 2, C_GOLD)
+    FOR q = 0 TO 3
+        e = envs{STR$(q)}
+        ex = e{"x"}
+        ey = e{"y"}
+        eal = e{"alive"}
+        cc = CINT(bcols[q])
+        IF eal[0] < 1 THEN cc = 5
+        cx = CINT(ex[0] / 2)
+        cy = CINT(ey[0] / 2) + 60
+        FOR dy = -2 TO 2
+            FOR dx = -2 TO 2
+                IF cx + dx >= 0 AND cx + dx < W AND cy + dy >= 0 AND cy + dy < H THEN fr[(cy + dy) * W + cx + dx] = cc
+            NEXT dx
+        NEXT dy
+        DrawText(fr, bnames$[q], 40 + q * 112, 440, 1, CINT(bcols[q]))
+    NEXT q
+    DrawText(fr, "GENERATIONS 3  8  15  25 OF ONE EVOLUTION RUN", 100, 456, 1, C_DIM)
+    PUSH(frames, fr)
+NEXT f
+
+' ---- scene 4: learning curves draw themselves (30 frames), from assets/curves.csv (written by plot_curves.jdb)
 DIM rows AS ARRAY = SPLIT(TXTREADER$("assets/curves.csv"), CHR$(10))
 DIM nrow AS INTEGER = LEN(rows)
 DIM cf AS ARRAY = ["a"]
@@ -218,7 +292,7 @@ FOR f = 0 TO 29
     PUSH(frames, fr)
 NEXT f
 
-' ---- scene 4: the numbers (16 frames)
+' ---- scene 5: the numbers (16 frames)
 FOR f = 0 TO 15
     fr = ZEROS([W * H])
     Centered(fr, "THE NUMBERS", 40, 4, C_GOLD)

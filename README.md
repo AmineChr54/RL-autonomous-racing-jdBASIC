@@ -113,7 +113,7 @@ Every step runs under the memory cap of `tools/jd.sh`, one jdBasic process at a 
 
 ![pitch](docs/gifs/pitch.gif)
 
-Composed and encoded entirely in jdBasic: `JD_MEM=1500 tools/jd.sh run pitch.jdb` stitches the four per-method GIFs from `record.jdb` into one 2 x 2 film with a title card, the learning curves drawing themselves and a numbers card (built-in pixel font, `lib/gif.jdb` encoder).
+Composed and encoded entirely in jdBasic: `JD_MEM=1500 tools/jd.sh run pitch.jdb` stitches the four per-method GIFs from `record.jdb` into one 2 x 2 film with a title card, a skill-ladder race of four brains, the learning curves drawing themselves and a numbers card (built-in pixel font, `lib/gif.jdb` encoder).
 
 ## Play against the AI
 
