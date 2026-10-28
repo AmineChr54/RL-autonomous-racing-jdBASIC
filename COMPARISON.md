@@ -56,6 +56,15 @@ PPO learns fastest. DQN is too slow (about 45 s/iteration) and too short a run t
 
 Final mean 3113 +- 513 px; every seed reaches half a lap, on average at generation 24.8 (range 19-30). Seed 0 matches the single-run curve (26). The 8 trainings took 263 s in parallel (about 4.7x faster than one after another), peak 550 MB.
 
+### Seed-to-seed variance (REINFORCE, 60 iterations, 8 seeds in parallel)
+
+| seed | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
+|---|---|---|---|---|---|---|---|---|
+| half-lap iteration | 38 | 43 | 36 | 44 | 52 | 46 | 41 | 38 |
+| final mean (px) | 4087 | 3986 | 3896 | 3252 | 3129 | 3677 | 3560 | 4106 |
+
+Final mean 3712 +- 350 px, half a lap at iteration 42.2 on average (36-52); seed 0 matches the single-run curve (38). 628 s in parallel instead of about 2830 s one after another (4.5x), peak 626 MB. REINFORCE is steadier across seeds than evolution (spread 9% vs 16% of the mean) but needs about 1.7x more iterations to reach half a lap.
+
 ## What replaced what
 
 | Python | jdBasic |
