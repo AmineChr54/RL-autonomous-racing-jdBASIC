@@ -1,7 +1,8 @@
 ' playable.jdb - race the best evolved brain yourself (issue #56). Interpreted (needs the GFX window):
 '   tools/jd.sh run playable.jdb                       arrow keys / WASD: steer + throttle, R restart, Esc quit
-'   tools/jd.sh run playable.jdb demo 400 out.png      autopilot for the human car, screenshot after 400 ticks, exit
-' The AI opponent is assets/best_brain.json (made by train_brain.jdb). First car over one lap wins; a crash ends your run.
+'   tools/jd.sh run playable.jdb demo 400 out.png [1-4 -> 0-3]   autopilot for the human car, opponent level 0-3 (default 3)
+' Opponents (keys 1-4, made by train_brain.jdb): ROOKIE, PRO, EXPERT, CHAMPION = the best brain of evolution generation 3, 8, 15, 25.
+' First car over one lap wins; a crash ends your run.
 IMPORT TRACK, ENV, BRAIN, GUI
 
 CONST LAP_TICKS_PER_SEC = 60
@@ -24,8 +25,18 @@ ENDIF
 
 DIM tr AS MAP = TRACK.NEW("hard")
 DIM tl AS DOUBLE = tr{"length"}
-DIM one AS ARRAY = JSON.PARSE$(TXTREADER$("assets/best_brain.json"))
-DIM br AS MAP = BRAIN.PREP(RESHAPE(one + 0, [1, BRAIN.GENOME_SIZE()]))
+DIM files$ = ["assets/brain_rookie.json", "assets/brain_pro.json", "assets/brain_expert.json", "assets/best_brain.json"]
+DIM names$ = ["ROOKIE", "PRO", "EXPERT", "CHAMPION"]
+DIM brs AS MAP = {}
+DIM one AS ARRAY = [0]
+DIM bi AS INTEGER = 0
+FOR bi = 0 TO 3
+    one = JSON.PARSE$(TXTREADER$(files$[bi]))
+    brs{STR$(bi)} = BRAIN.PREP(RESHAPE(one + 0, [1, BRAIN.GENOME_SIZE()]))
+NEXT bi
+DIM lvl AS INTEGER = 3
+IF demo = 1 AND LEN(OS.ARGS()) > 4 THEN lvl = CINT(VAL(OS.ARGS()[4]))
+DIM br AS MAP = brs{STR$(lvl)}
 
 DIM he AS MAP = ENV.NEW(tr, 1, 1000000, 0)        ' the human's car
 DIM ae AS MAP = ENV.NEW(tr, 1, 1000000, 1)        ' the AI's car
@@ -101,6 +112,16 @@ DIM txt$ = ""
 WHILE running = 1
     f0 = TICK()
     IF gQuit = 1 OR GFX.KEYSTATE("Escape") THEN running = 0
+    FOR bi = 0 TO 3
+        IF GFX.KEYSTATE(STR$(bi + 1)) AND lvl <> bi THEN
+            lvl = bi
+            br = brs{STR$(lvl)}
+            hobs = ENV.RESET(he)
+            aobs = ENV.RESET(ae)
+            ticks = 0
+            state = 0
+        ENDIF
+    NEXT bi
     IF GFX.KEYSTATE("R") THEN
         hobs = ENV.RESET(he)
         aobs = ENV.RESET(ae)
@@ -200,11 +221,12 @@ WHILE running = 1
     GUI.TXT FORMAT$("you    {:4.0f}%  of a lap", MIN([hpr[0] / tl * 100, 999])), px + 15, 80, 16, 0, 255, 255, 255
     GUI.TXT FORMAT$("AI     {:4.0f}%  of a lap", MIN([apr[0] / tl * 100, 999])), px + 15, 100, 16, 0, 120, 200, 255
     GUI.TXT "your best: " + best$, px + 15, 130, 16, 0, 225, 228, 235
-    GUI.TXT "BEST LAPS", px + 15, 170, 16, 1, 255, 214, 102
+    GUI.TXT "opponent: " + names$[lvl] + "  (keys 1-4)", px + 15, 150, 16, 0, 120, 200, 255
+    GUI.TXT "BEST LAPS", px + 15, 185, 16, 1, 255, 214, 102
     FOR li = 0 TO ntop - 1
-        GUI.TXT FORMAT$("{}. {:6.2f} s", li + 1, top[li] / LAP_TICKS_PER_SEC), px + 15, 195 + li * 20, 16, 0, 225, 228, 235
+        GUI.TXT FORMAT$("{}. {:6.2f} s", li + 1, top[li] / LAP_TICKS_PER_SEC), px + 15, 210 + li * 20, 16, 0, 225, 228, 235
     NEXT li
-    IF ntop = 0 THEN GUI.TXT "(finish a lap to set one)", px + 15, 195, 14, 0, 160, 165, 175
+    IF ntop = 0 THEN GUI.TXT "(finish a lap to set one)", px + 15, 210, 14, 0, 160, 165, 175
     GUI.TXT "Arrows / WASD drive   R restart   Esc quit", px + 15, 660, 13, 0, 160, 165, 175
     IF state = 1 THEN msg$ = "YOU WIN!"
     IF state = 2 THEN msg$ = "THE AI WINS - press R"

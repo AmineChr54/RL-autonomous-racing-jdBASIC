@@ -109,11 +109,11 @@ Composed and encoded entirely in jdBasic: `JD_MEM=1500 tools/jd.sh run pitch.jdb
 ## Play against the AI
 
 ```bash
-tools/jd.sh native train_brain.jdb 25     # optional: retrain the opponent (assets/best_brain.json is committed)
+tools/jd.sh native train_brain.jdb 25     # optional: retrain the four opponents (assets/brain_*.json and best_brain.json are committed)
 tools/jd.sh run playable.jdb               # arrows / WASD to drive, R restart, Esc quit
 ```
 
-You race the best evolved brain on the hard track; the first car over one lap wins and a crash ends your run. A lap takes the AI about 8 s.
+You race an evolved brain on the hard track; the first car over one lap wins and a crash ends your run. Keys 1-4 pick the opponent: ROOKIE, PRO, EXPERT, CHAMPION are the best brains of evolution generation 3, 8, 15 and 25 (1192, 1965, 4902 and 5795 px in training; the champion laps in about 8 s). The side panel keeps your top-5 laps and a ghost replays your best one.
 ![playable screenshot](assets/playable_shot.png)
 
 ## Tests

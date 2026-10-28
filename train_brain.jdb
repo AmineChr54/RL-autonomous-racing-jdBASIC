@@ -1,5 +1,6 @@
-' train_brain.jdb: train neuroevolution headless and save the best genome as the AI opponent of playable.jdb.
-'   tools/jd.sh native train_brain.jdb 25          generations (about 5 s each, native) -> assets/best_brain.json
+' train_brain.jdb: train neuroevolution headless and save the best genomes as the AI opponents of playable.jdb.
+'   tools/jd.sh native train_brain.jdb 25          generations (about 5 s each, native)
+' -> assets/brain_rookie.json (generation 3), assets/brain_pro.json (generation 8), assets/brain_expert.json (generation 15), assets/best_brain.json (the last generation, the champion)
 IMPORT TRACK, ENV, EVOLUTION
 DIM gens AS INTEGER = 25
 IF LEN(OS.ARGS()) > 1 THEN gens = CINT(VAL(OS.ARGS()[1]))
@@ -11,6 +12,9 @@ WHILE ev{"generation"} <= gens
     IF EVOLUTION.ADVANCE(ev) = 1 THEN
         hb = ev{"hist_best"}
         PRINT "gen "; LEN(hb); "  best "; INT(hb[LEN(hb) - 1]); " px"
+        IF LEN(hb) = 3 THEN TXTWRITER "assets/brain_rookie.json", EVOLUTION.SAVE_JSON$(ev)
+        IF LEN(hb) = 8 THEN TXTWRITER "assets/brain_pro.json", EVOLUTION.SAVE_JSON$(ev)
+        IF LEN(hb) = 15 THEN TXTWRITER "assets/brain_expert.json", EVOLUTION.SAVE_JSON$(ev)
     ENDIF
 WEND
 TXTWRITER "assets/best_brain.json", EVOLUTION.SAVE_JSON$(ev)
