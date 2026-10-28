@@ -1,0 +1,58 @@
+' par_seeds.jdb: train the same method with several seeds at once, one ASYNC worker (OS thread) per seed (issue #54).
+'   tools/jd.sh native par_seeds.jdb ppo 5 4      mode (evolution|reinforce|dqn|ppo), iterations, workers (seeds 0..workers-1); native -c only
+' Each worker owns its own track and env; only the final mean distance comes back through the pool.
+IMPORT TRACK, TRAINER, POOL
+
+FUNC ModeName$(m AS INTEGER)
+    IF m = 0 THEN RETURN "evolution"
+    IF m = 1 THEN RETURN "reinforce"
+    IF m = 2 THEN RETURN "dqn"
+    RETURN "ppo"
+ENDFUNC
+
+FUNC TrainSeed(m AS INTEGER, iters AS INTEGER, seed AS INTEGER) AS DOUBLE
+    DIM mode$ = ModeName$(m)
+    DIM tr AS MAP = TRACK.NEW("hard")
+    DIM t AS MAP = TRAINER.NEW(mode$, tr, 200, 900, seed)
+    DIM hm AS ARRAY = [0]
+    WHILE t{"generation"} <= iters
+        DIM dummy AS INTEGER = TRAINER.ADVANCE(t)
+    WEND
+    hm = t{"hist_mean"}
+    RETURN hm[LEN(hm) - 1]
+ENDFUNC
+
+ASYNC FUNC Worker(jobs, results, m, iters)
+    DO
+        DIM idx = POOL.TAKE_JOB(jobs, results)
+        IF idx < 0 THEN EXITDO
+        TRY
+            POOL.DONE(results, idx, TrainSeed(CINT(m), CINT(iters), CINT(idx)))
+        CATCH
+            POOL.FAILED(results, idx, ERRMSG$)
+        ENDTRY
+    LOOP
+    RETURN 0
+ENDFUNC
+
+DIM mode$ = OS.ARGS()[1]
+DIM m AS INTEGER = 3
+IF mode$ = "evolution" THEN m = 0
+IF mode$ = "reinforce" THEN m = 1
+IF mode$ = "dqn" THEN m = 2
+DIM iters AS INTEGER = CINT(VAL(OS.ARGS()[2]))
+DIM nw AS INTEGER = CINT(VAL(OS.ARGS()[3]))
+DIM t0 AS DOUBLE = TICK()
+DIM p = POOL.CREATE(nw)
+DIM w AS INTEGER = 0
+FOR w = 1 TO nw
+    POOL.SPAWN(p, Worker(POOL.JOBS(p), POOL.RESULTS(p), m, iters))
+NEXT w
+PRINT "finished "; POOL.GATHER(p, 1800000, FALSE); " of "; nw
+PRINT "final mean distance per seed: "; POOL.VALUES(p)
+PRINT "states: "; POOL.STATES(p)
+FOR w = 0 TO nw - 1
+    IF POOL.STATE$(p, w) <> "ok" THEN PRINT "  job "; w; ": "; POOL.REASON$(p, w)
+NEXT w
+PRINT "wall "; INT((TICK() - t0) / 1000); " s"
+POOL.SHUTDOWN(p)

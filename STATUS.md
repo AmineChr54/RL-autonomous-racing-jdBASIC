@@ -114,3 +114,9 @@ case-insensitive, `W` and `w` collided in a loop; no hidden-window mode, so `--s
 | ENV.TICK (full) | 34.9 | 1.32 | 26x |
 | EVOLUTION.ADVANCE (1 tick) | 50.2 | 3.33 | 15x |
 Run: `tools/jd.sh run bench.jdb 3 interp` / `tools/jd.sh native bench.jdb 20 native`; writes `assets/bench_<mode>.json`. Per-iteration training times are in the smoke-test sections (evolution 5.2 s/gen, REINFORCE 5.9 s/iter native; DQN ~80 s/iter, #46).
+
+## Parallel seeds (issue #54, `par_seeds.jdb`, native only)
+`tools/jd.sh native par_seeds.jdb evolution 2 8`: one ASYNC worker (OS thread) per seed through `lib/pool.jdb`, each with its own track and env.
+- evolution, REINFORCE: correct. Seed 0 on 4 threads equals the single-process result exactly (159.35786). 8 seeds in 14 s vs 7 s for one (about 4x throughput), peak 293 MB.
+- PPO, DQN: fail with more than one worker (random "Array index out of bounds" / "MATMUL: incompatible dimensions", different on every run). They use the torch.jdb tape, which seems to be shared global state between threads under -c.
+- A string argument to an `ASYNC FUNC` arrives as null under -c: pass the mode as a number.
