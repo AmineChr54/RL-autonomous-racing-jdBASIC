@@ -30,14 +30,14 @@ DIM br AS MAP = BRAIN.PREP(RESHAPE(one + 0, [1, BRAIN.GENOME_SIZE()]))
 DIM he AS MAP = ENV.NEW(tr, 1, 1000000, 0)        ' the human's car
 DIM ae AS MAP = ENV.NEW(tr, 1, 1000000, 1)        ' the AI's car
 DIM view AS MAP = {}                              ' both cars as one 2-car env, for GUI.DRAW_WORLD
-view{"n"} = 2
-view{"x"} = ZEROS([2])
-view{"y"} = ZEROS([2])
-view{"th"} = ZEROS([2])
-view{"alive"} = ONES([2])
-view{"progress"} = ZEROS([2])
+view{"n"} = 3                                   ' you, AI, ghost of your best lap
+view{"x"} = ZEROS([3])
+view{"y"} = ZEROS([3])
+view{"th"} = ZEROS([3])
+view{"alive"} = ONES([3])
+view{"progress"} = ZEROS([3])
 
-DIM gui AS MAP = GUI.NEW(tr, 2)
+DIM gui AS MAP = GUI.NEW(tr, 3)
 ON "QUIT" CALL OnQuit
 
 DIM hobs AS ARRAY = ENV.RESET(he)
@@ -69,6 +69,34 @@ DIM vpr AS ARRAY = view{"progress"}
 DIM px AS INTEGER = TRACK.WORLD_W
 DIM best$ = "none yet"
 DIM msg$ = ""
+DIM demoRun AS INTEGER = 0
+
+' ---- best laps (top 5, saved in ticks) and the ghost of the best one
+CONST MAXT = 20000
+DIM rx AS ARRAY = ZEROS([MAXT])
+DIM ry AS ARRAY = ZEROS([MAXT])
+DIM rth AS ARRAY = ZEROS([MAXT])
+DIM gx AS ARRAY = ZEROS([MAXT])
+DIM gy AS ARRAY = ZEROS([MAXT])
+DIM gth AS ARRAY = ZEROS([MAXT])
+DIM glen AS INTEGER = 0
+DIM top AS ARRAY = ZEROS([5])
+DIM ntop AS INTEGER = 0
+DIM lines AS ARRAY = ["a"]
+DIM li AS INTEGER = 0
+MKDIR "saves"
+IF FILE.EXISTS("saves/best_laps.txt") THEN
+    lines = SPLIT(TXTREADER$("saves/best_laps.txt"), CHR$(10))
+    FOR li = 0 TO LEN(lines) - 1
+        IF LEN(lines[li]) > 0 AND ntop < 5 THEN
+            top[ntop] = VAL(lines[li])
+            ntop = ntop + 1
+        ENDIF
+    NEXT li
+ENDIF
+DIM gi AS INTEGER = 0
+DIM sw AS DOUBLE = 0.0
+DIM txt$ = ""
 
 WHILE running = 1
     f0 = TICK()
@@ -101,12 +129,46 @@ WHILE running = 1
             hact[0, 1] = thr
         ENDIF
         hobs = ENV.TICK(he, hact)
+        IF ticks < MAXT THEN
+            rx[ticks] = hx[0]
+            ry[ticks] = hy[0]
+            rth[ticks] = hth[0]
+        ENDIF
         ticks = ticks + 1
         IF hal[0] = 0 THEN state = 3
-        IF apr[0] >= tl AND state = 0 THEN state = 2
+        IF apr[0] >= tl AND state = 0 AND demo = 0 THEN state = 2
         IF hpr[0] >= tl THEN
             state = 1
             best$ = FORMAT$("{:.2f} s", ticks / LAP_TICKS_PER_SEC)
+            ' insert into the top 5 (ascending ticks), keep the ghost when this is the new best
+            IF ntop < 5 THEN
+                top[ntop] = ticks
+                ntop = ntop + 1
+            ELSEIF ticks < top[4] THEN
+                top[4] = ticks
+            ENDIF
+            FOR li = 0 TO ntop - 2
+                FOR gi = 0 TO ntop - 2 - li
+                    IF top[gi] > top[gi + 1] THEN
+                        sw = top[gi]
+                        top[gi] = top[gi + 1]
+                        top[gi + 1] = sw
+                    ENDIF
+                NEXT gi
+            NEXT li
+            IF ticks = top[0] AND ticks < MAXT THEN
+                glen = ticks
+                FOR gi = 0 TO ticks - 1
+                    gx[gi] = rx[gi]
+                    gy[gi] = ry[gi]
+                    gth[gi] = rth[gi]
+                NEXT gi
+            ENDIF
+            txt$ = ""
+            FOR li = 0 TO ntop - 1
+                txt$ = txt$ + STR$(INT(top[li])) + CHR$(10)
+            NEXT li
+            TXTWRITER "saves/best_laps.txt", txt$
         ENDIF
     ENDIF
     vx[0] = hx[0]
@@ -119,7 +181,17 @@ WHILE running = 1
     vth[1] = ath[0]
     val2[1] = aal[0]
     vpr[1] = apr[0]
+    ' ghost: your best lap replayed (only while a race is running)
+    val2[2] = 0
+    IF glen > 0 AND state = 0 AND ticks < glen THEN
+        vx[2] = gx[ticks]
+        vy[2] = gy[ticks]
+        vth[2] = gth[ticks]
+        val2[2] = 1
+        vpr[2] = ticks / glen * tl
+    ENDIF
     GUI.DRAW_WORLD(gui, view)
+    IF val2[2] = 1 THEN GUI.TXT "GHOST", vx[2] - 18, vy[2] - 26, 12, 0, 200, 200, 200
     GUI.TXT "YOU", hx[0] - 10, hy[0] - 26, 14, 1, 255, 255, 255
     GUI.TXT "AI", ax[0] - 6, ay[0] - 26, 14, 1, 120, 200, 255
     RECT px, 0, GUI.PANEL, GUI.WIN_H, TRUE, 22, 24, 29
@@ -128,12 +200,24 @@ WHILE running = 1
     GUI.TXT FORMAT$("you    {:4.0f}%  of a lap", MIN([hpr[0] / tl * 100, 999])), px + 15, 80, 16, 0, 255, 255, 255
     GUI.TXT FORMAT$("AI     {:4.0f}%  of a lap", MIN([apr[0] / tl * 100, 999])), px + 15, 100, 16, 0, 120, 200, 255
     GUI.TXT "your best: " + best$, px + 15, 130, 16, 0, 225, 228, 235
+    GUI.TXT "BEST LAPS", px + 15, 170, 16, 1, 255, 214, 102
+    FOR li = 0 TO ntop - 1
+        GUI.TXT FORMAT$("{}. {:6.2f} s", li + 1, top[li] / LAP_TICKS_PER_SEC), px + 15, 195 + li * 20, 16, 0, 225, 228, 235
+    NEXT li
+    IF ntop = 0 THEN GUI.TXT "(finish a lap to set one)", px + 15, 195, 14, 0, 160, 165, 175
     GUI.TXT "Arrows / WASD drive   R restart   Esc quit", px + 15, 660, 13, 0, 160, 165, 175
     IF state = 1 THEN msg$ = "YOU WIN!"
     IF state = 2 THEN msg$ = "THE AI WINS - press R"
     IF state = 3 THEN msg$ = "CRASHED - press R"
     IF state > 0 THEN GUI.TXT msg$, 330, 320, 30, 1, 255, 255, 120
-    IF demo = 1 AND (ticks >= demoTicks OR state > 0) THEN
+    IF demo = 1 AND state > 0 AND demoRun = 0 THEN
+        ' demo: race once, then restart so the ghost of that run shows in the second one
+        demoRun = 1
+        hobs = ENV.RESET(he)
+        aobs = ENV.RESET(ae)
+        ticks = 0
+        state = 0
+    ELSEIF demo = 1 AND demoRun = 1 AND (ticks >= demoTicks OR state > 0) THEN
         GFX.SAVE_SCREENSHOT(shot$)
         running = 0
     ENDIF
