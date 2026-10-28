@@ -2,9 +2,20 @@
 ' (selection on the WORSE of the two lap fractions; the mean did not work: it rewards the easy track, 4.25 laps easy vs 0.56 hard) and compare with the hard-only champion of train_brain.jdb.
 ' Alternating the track per generation instead does not work: the elites flip to whichever track ran last (hard 0.10 laps, easy 4.26).
 '   tools/jd.sh native train_general.jdb 40        train: generations (about 5 s each) -> assets/brain_general.json
-'   tools/jd.sh run train_general.jdb eval         compare the saved brains (interpreted: the native Report prints nothing, see STATUS.md)
+'   tools/jd.sh run|native train_general.jdb eval  compare the saved brains
 ' Prints, for each brain, the distance (laps) one car reaches on each track in 1500 ticks.
 IMPORT TRACK, ENV, BRAIN, EVOLUTION
+
+' JSON.PARSE$ arrays segfault when used under -c (issue #45): copy the numbers into a fresh array
+FUNC LoadGenome(path$) AS ARRAY
+    DIM raw AS ARRAY = JSON.PARSE$(TXTREADER$(path$))
+    DIM g AS ARRAY = ZEROS([BRAIN.GENOME_SIZE()])
+    DIM i AS INTEGER = 0
+    FOR i = 0 TO BRAIN.GENOME_SIZE() - 1
+        g[i] = raw[i]
+    NEXT i
+    RETURN g
+ENDFUNC
 
 ' one car, start noise on, until it crashes or 1500 ticks pass; returns the progress in px
 FUNC Drive(genome AS ARRAY, tr AS MAP, seed AS INTEGER) AS DOUBLE
@@ -78,8 +89,8 @@ WHILE ev{"generation"} <= gens
     ENDIF
 WEND
 IF gens > 0 THEN TXTWRITER "assets/brain_general.json", EVOLUTION.SAVE_JSON$(ev)
-DIM champ AS ARRAY = JSON.PARSE$(TXTREADER$("assets/best_brain.json"))
-DIM gen1 AS ARRAY = JSON.PARSE$(TXTREADER$("assets/brain_general.json"))
+DIM champ AS ARRAY = LoadGenome("assets/best_brain.json")
+DIM gen1 AS ARRAY = LoadGenome("assets/brain_general.json")
 PRINT
 Report("hard-only champion", champ, th, te)
 Report("two-track brain", gen1, th, te)

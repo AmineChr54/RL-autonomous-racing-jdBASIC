@@ -74,5 +74,4 @@ hard-only champion. The likely reason is that one elite is the best of 200 cars 
 track can be luck. A fair test needs several starts per genome (fitness = average over starts), which multiplies the cost of a
 generation. Seven rays and a speed reading may also simply be too little for a bend the brain has never seen. Not solved here.
 
-Side note: the compiled `train_general.exe` segfaults (exit 139) in its comparison step after training; the same code runs in the
-interpreter, so the comparison is run as `train_general.jdb eval` (not isolated yet, see STATUS.md).
+Side note: the compiled comparison first segfaulted because arrays from `JSON.PARSE$` are unusable under `-c` (#45); copying the values into a fresh array fixes it, and native and interpreted runs now give identical numbers.
