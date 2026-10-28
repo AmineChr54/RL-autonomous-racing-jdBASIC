@@ -17,8 +17,7 @@ stated). Sources: `bench.jdb`, `plot_curves.jdb`, `par_seeds.jdb`, `STATUS.md`, 
   generation costs the same as an iteration of the others (about 5 s native).
 - **REINFORCE is steady but slow**; its curve keeps rising at iteration 100 (4702 px, best car 1.8 laps).
 - **DQN is undecided**: 15 iterations is too short, and an iteration costs about 45 s (see 3), so a fair run takes hours.
-- One seed is not evidence. Seed 0 happened to be the best or near the best for several methods, so single-curve claims in the
-  Python README should be read with the spread in mind.
+- One seed is not evidence: seed 0 ended below the 8-seed average for evolution (2776 vs 3113 px) and for PPO (5382 vs 5381 px is average, but it was 5 iterations faster than the slowest seed to half a lap), and above it for REINFORCE (4087 vs 3712 px). Quote the mean and spread, not one curve.
 
 ## 2. How fast is the compiled backend?
 
