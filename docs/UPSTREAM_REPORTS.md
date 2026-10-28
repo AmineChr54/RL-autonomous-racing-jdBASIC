@@ -34,3 +34,25 @@ The interpreter broadcasts the row correctly (and column broadcast `[N,k]*[N,1]`
 - `TESTKIT.EQARRAY` on 2-D arrays is always false under `-c`; `NOW_EPOCH()` has whole-second resolution under `-c`.
 - `TORCH`-style code: `ASYNC FUNC` workers that use one module's global tape race with each other (PPO/DQN fail with more than one worker, evolution/REINFORCE are fine).
 - Build 102 has `OS.FEATURE("OPENGL")` FALSE; `GL.*` has no compute shaders or read-back, so the iGPU cannot be used for simulation.
+
+## 7. `-c`: arrays from `JSON.PARSE$` (re-verified 2026-10-28, #45)
+```basic
+DIM m = JSON.PARSE$("{" + CHR$(34) + "0" + CHR$(34) + ": [[1.5,2.5,3.5],[4.5,5.5,6.5]]}")
+DIM a AS ARRAY = m{"0"}
+DIM d AS ARRAY = ZEROS([6])
+DIM r AS INTEGER = 0
+DIM c AS INTEGER = 0
+FOR r = 0 TO 1
+    FOR c = 0 TO 2
+        d[r * 3 + c] = a[r, c]
+    NEXT c
+NEXT r
+PRINT SUM(d)        ' expected 24
+```
+Interpreter: 24. `-c`: 0 (reading `a[r, c]` inside PRINT gives the right value; storing it gives 0; `RESHAPE(a + 0, [6])` also gives zeros, and passing a parsed array on as an argument segfaults). A flat parsed list (`[1.5, 2.5]`) works. Workaround: save flat lists.
+
+## 8. GFX wishes found by the GUI port (#52)
+- A hidden-window mode so `--shot` / `--record` can run in CI.
+- Polygon fill (cars are 8 lines each); `LINE` with a matrix ignores inline r,g,b and needs an Nx3 colour matrix.
+- Image resize; a way to turn a screen capture sequence into a GIF; mixing font sizes needs `SETFONT` before every `TEXT`.
+- `JSON.STRINGIFY$` and `DF.WRITECSV` keep only 6-7 significant digits (lossy for doubles).
