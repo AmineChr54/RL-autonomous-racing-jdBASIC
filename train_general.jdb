@@ -1,0 +1,85 @@
+' train_general.jdb: does a brain evolved on ONE track drive another? Evolve with every genome scored on BOTH tracks
+' (selection on the WORSE of the two lap fractions; the mean did not work: it rewards the easy track, 4.25 laps easy vs 0.56 hard) and compare with the hard-only champion of train_brain.jdb.
+' Alternating the track per generation instead does not work: the elites flip to whichever track ran last (hard 0.10 laps, easy 4.26).
+'   tools/jd.sh native train_general.jdb 40        train: generations (about 5 s each) -> assets/brain_general.json
+'   tools/jd.sh run train_general.jdb eval         compare the saved brains (interpreted: the native Report prints nothing, see STATUS.md)
+' Prints, for each brain, the distance (laps) one car reaches on each track in 1500 ticks.
+IMPORT TRACK, ENV, BRAIN, EVOLUTION
+
+' one car, start noise on, until it crashes or 1500 ticks pass; returns the progress in px
+FUNC Drive(genome AS ARRAY, tr AS MAP, seed AS INTEGER) AS DOUBLE
+    DIM e AS MAP = ENV.NEW(tr, 1, 1500, seed)
+    DIM br AS MAP = BRAIN.PREP(RESHAPE(genome + 0, [1, BRAIN.GENOME_SIZE()]))
+    DIM obs AS ARRAY = ENV.RESET(e)
+    DIM act AS ARRAY = RESHAPE(ZEROS([2]), [1, 2])
+    DIM out AS ARRAY = BRAIN.FORWARD(br, obs)
+    DIM al AS ARRAY = e{"alive"}
+    DIM pr AS ARRAY = e{"progress"}
+    DIM k AS INTEGER = 0
+    FOR k = 1 TO 1500
+        out = BRAIN.FORWARD(br, obs)
+        act[0, 0] = out[0, 0]
+        act[0, 1] = out[0, 1]
+        obs = ENV.TICK(e, act)
+        IF al[0] < 1 THEN EXITFOR
+    NEXT k
+    RETURN pr[0]
+ENDFUNC
+
+SUB Report(name$, genome AS ARRAY, th AS MAP, te AS MAP)
+    DIM hh AS DOUBLE = 0.0
+    DIM ee AS DOUBLE = 0.0
+    DIM s AS INTEGER = 0
+    DIM lh AS DOUBLE = th{"length"}
+    DIM le AS DOUBLE = te{"length"}
+    ' mean over 5 noisy starts per track
+    FOR s = 1 TO 5
+        hh = hh + Drive(genome, th, s) / 5
+        ee = ee + Drive(genome, te, s) / 5
+    NEXT s
+    PRINT RPAD$(name$, 22); FORMAT$("hard {:6.0f} px ({:4.2f} laps)    easy {:6.0f} px ({:4.2f} laps)", hh, hh / lh, ee, ee / le)
+ENDSUB
+
+DIM gens AS INTEGER = 40
+IF LEN(OS.ARGS()) > 1 THEN gens = CINT(VAL(OS.ARGS()[1]))      ' 'eval' -> 0 generations
+DIM th AS MAP = TRACK.NEW("hard")
+DIM te AS MAP = TRACK.NEW("easy")
+DIM lh AS DOUBLE = th{"length"}
+DIM le AS DOUBLE = te{"length"}
+DIM eh AS MAP = ENV.NEW(th, 200, 900, 0)
+DIM ee AS MAP = ENV.NEW(te, 200, 900, 0)
+DIM ev AS MAP = EVOLUTION.NEW(eh, 0)
+DIM hb AS ARRAY = [0]
+DIM brx AS MAP
+DIM oh AS ARRAY = ev{"obs"}
+DIM oe AS ARRAY = ENV.RESET(ee)
+DIM bh AS ARRAY = eh{"best_progress"}
+DIM be AS ARRAY = ee{"best_progress"}
+DIM i AS INTEGER = 0
+DIM dummy AS INTEGER = 0
+WHILE ev{"generation"} <= gens
+    brx = ev{"brains"}
+    IF ENV.ALL_DEAD(eh) = 0 THEN
+        oh = ev{"obs"}
+        ev{"obs"} = ENV.TICK(eh, BRAIN.FORWARD(brx, oh))
+    ENDIF
+    IF ENV.ALL_DEAD(ee) = 0 THEN oe = ENV.TICK(ee, BRAIN.FORWARD(brx, oe))
+    IF ENV.ALL_DEAD(eh) = 1 AND ENV.ALL_DEAD(ee) = 1 THEN
+        ' selection score = the worse of the two lap fractions, in hard-track pixels so EVOLUTION can use it unchanged
+        bh = eh{"best_progress"}
+        be = ee{"best_progress"}
+        FOR i = 0 TO LEN(bh) - 1
+            bh[i] = MIN([bh[i] / lh, be[i] / le]) * lh
+        NEXT i
+        dummy = EVOLUTION.ADVANCE(ev)          ' all cars are dead, so this only builds the next generation
+        oe = ENV.RESET(ee)
+        hb = ev{"hist_best"}
+        PRINT "gen "; LEN(hb); "  best worse-of-two-tracks "; FORMAT$("{:.2f}", hb[LEN(hb) - 1] / lh); " laps"
+    ENDIF
+WEND
+IF gens > 0 THEN TXTWRITER "assets/brain_general.json", EVOLUTION.SAVE_JSON$(ev)
+DIM champ AS ARRAY = JSON.PARSE$(TXTREADER$("assets/best_brain.json"))
+DIM gen1 AS ARRAY = JSON.PARSE$(TXTREADER$("assets/brain_general.json"))
+PRINT
+Report("hard-only champion", champ, th, te)
+Report("two-track brain", gen1, th, te)

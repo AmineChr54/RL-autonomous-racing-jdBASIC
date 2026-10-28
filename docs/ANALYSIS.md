@@ -56,6 +56,23 @@ A jdBasic with leak-free array temporaries and faster array kernels would shrink
 back to the tape) and make DQN practical. Achim reports the leaks fixed in Build 109 / v1.2.0; that is the first thing to
 re-measure once the new build is installed. Draft upstream reports: `docs/UPSTREAM_REPORTS.md`.
 
-## 7. Generalisation
+## 7. Generalisation (an experiment that did not work)
 
-The evolved champion (1.8 laps on the hard track) does not transfer: on the easy track the champion crashes at 62% of the lap, at one sharp bend, and so do the other brains started there (`playable.jdb demo 400 out.png 3 easy`). Seven rays and a speed reading are enough to follow the track it was evolved on, but evolution only optimised for that one layout. Training on both tracks, or on randomised tracks, is the obvious next experiment.
+Distance of one car in 1500 ticks, mean over 5 noisy starts (`tools/jd.sh run train_general.jdb eval`; lap = 3186 px hard, about 2415 px easy):
+
+| brain (40 generations unless noted) | hard track | easy track |
+|---|---|---|
+| hard-only champion (`train_brain.jdb`, 25 gen) | 3.03 laps | 0.62 laps |
+| track alternates every generation | 0.10 laps | 4.26 laps |
+| selection on the mean of both lap fractions | 0.56 laps | 4.25 laps |
+| selection on the worse of both lap fractions | 2.86 laps | 0.61 laps |
+
+The hard-only champion crashes at one sharp bend of the easy track (62% of a lap). Every way of mixing the tracks ended as a specialist
+again: alternating makes the elites flip to whichever track ran last; averaging rewards the easy track, where laps are cheap; taking the
+worse of the two reported 1.88 laps on both tracks during training but the saved brain drives the easy track no better than the
+hard-only champion. The likely reason is that one elite is the best of 200 cars each with one random start, so its score on each
+track can be luck. A fair test needs several starts per genome (fitness = average over starts), which multiplies the cost of a
+generation. Seven rays and a speed reading may also simply be too little for a bend the brain has never seen. Not solved here.
+
+Side note: the compiled `train_general.exe` segfaults (exit 139) in its comparison step after training; the same code runs in the
+interpreter, so the comparison is run as `train_general.jdb eval` (not isolated yet, see STATUS.md).
