@@ -10,7 +10,7 @@ The port has three goals:
 2. **Find out what jdBasic is missing** for this kind of numeric work, and how much each gap costs. This is in [COMPARISON.md](COMPARISON.md).
 3. **Run it both ways**: interpreted (`jdBasic main.jdb`) and compiled to a native `.exe` (`jdBasic -c main.jdb`).
 
-> **Status: work in progress.** The world (track and env), the per-car brains and the autograd engine are done. Each matches Python, or a numeric gradient for the autograd, in both backends. Neuroevolution runs in the interpreter. The gradient-based algorithms, the window and the docs are being built. See the [issues](../../issues) for what is done and what is next.
+> **Status:** all four learners, the window, the playable mode, the benchmarks, the learning curves and the pitch video work, interpreted and compiled. Open: DQN speed (#46), parallel training for DQN (#54), the OpenGL view (#55, needs a jdBasic build with GL), re-testing everything on the new jdBasic release. See the [issues](../../issues).
 
 ## What is in here
 
@@ -20,13 +20,16 @@ The port has three goals:
 | `env.jdb` | `env.py` | 200 cars: physics, 7 ray sensors, crash/stuck/timeout, progress reward | ✅ parity with Python, max diff 5e-10 |
 | `torch.jdb` | (PyTorch) | Tape autograd with 20 ops, MLP, Adam, `clip_grad_norm`, polyak, JSON save/load | ✅ gradcheck passes interpreted and native |
 | `brain.jdb` | `brain.py` | 290-number genomes, every car runs its own net, batched without `bmm` | ✅ identical to `forward_numpy` (2e-16) |
-| `evolution.jdb` | `evolution.py` | Elites, crossover, mutation | 🚧 interpreter works, native in progress |
+| `evolution.jdb` | `evolution.py` | Elites, crossover, mutation | ✅ interpreter and native, 8 seeds reach half a lap at generation 24.8 on average |
 | `rl_common.jdb`, `reinforce.jdb` | `rl_common.py`, `reinforce.py` | Shared rollout plumbing, REINFORCE on `torch.jdb` (tape in the interpreter, leak-free scalar loops under `-c`) | ✅ learns: mean passes half a lap at iteration 38 |
 | `ppo.jdb` | `ppo.py` | PPO: GAE, clipped objective, critic (tape in the interpreter, leak-free scalar loops under `-c`) | ✅ learns: mean passes half a lap at iteration 11, 5613 px mean after 50 |
-| `dqn.jdb` | `dqn.py` | DQN: replay buffer, target net, tape in the interpreter, scalar loops under `-c` | ✅ runs, gradients match; ~80 s/iteration, learning not yet measured |
+| `dqn.jdb` | `dqn.py` | DQN: replay buffer, target net, tape in the interpreter, scalar loops under `-c` | ✅ runs, gradients match; about 45 s/iteration, no half lap after 15 iterations (#46) |
 | `trainer.jdb`, `main.jdb` | `make_trainer`, `main.py` | Mode dispatch; headless mode and the 1400x700 GFX window (`gui.jdb`) with the same flags | ✅ headless + GUI work interpreted and native, all four modes; `--shot` / `--record` (PNG frames) |
 | `lib/gif.jdb`, `record.jdb` | (new) | Animated-GIF writer (GIF89a, LZW, quantiser; upstream candidate) and the recorder that films real training runs | ✅ the four GIFs above |
-| `plot_curves.jdb`, `bench.jdb` | `plot_curves.py`, `accel.py` | Learning-curve chart (SVG), timings interpreted vs native | ⏳ |
+| `plot_curves.jdb`, `bench.jdb` | `plot_curves.py`, `accel.py` | Learning-curve chart (SVG), timings interpreted vs native | ✅ `assets/curves.svg`, `bench.jdb` timings in STATUS.md |
+| `playable.jdb`, `train_brain.jdb` | (new) | Race the best evolved brain yourself: lap timer, best-lap table, ghost of your best lap | ✅ verified with an autopilot run; keyboard play untested |
+| `pitch.jdb` | (new) | The pitch GIF composed from the four recordings, with title and numbers cards | ✅ `docs/gifs/pitch.gif` |
+| `par_seeds.jdb` | (new) | Train many seeds at once on threads; the seed-variance tables in COMPARISON.md come from it | ✅ evolution, REINFORCE, PPO (staggered starts) |
 
 ## The engine live
 
