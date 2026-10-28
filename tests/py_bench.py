@@ -1,6 +1,6 @@
 """Python-side timings for the same operations bench.jdb measures (200 cars, hard track), for COMPARISON.md.
 
-    python tests/py_bench.py        (needs the Python original; $PY_PROJECT or the default D: path\RL-autonomous-racing)
+    python tests/py_bench.py        (needs the Python original: set PY_PROJECT or use the default path below)
 """
 import os, sys, time
 import numpy as np

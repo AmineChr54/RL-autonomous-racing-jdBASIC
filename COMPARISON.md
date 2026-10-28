@@ -22,17 +22,18 @@ All jdBasic numbers are from Build 102 (the installed build), 200 cars, hard tra
 
 The difference is almost all in the learners: Python gets `torch.autograd` for free.
 
-## Run time (200 cars, ms per call, `bench.jdb`)
+## Run time (200 cars, ms per call; `bench.jdb`, `tests/py_bench.py`)
 
-| op | interpreted | native -c | speedup |
+| op | Python (numpy) | jdBasic native -c | jdBasic interpreted |
 |---|---|---|---|
-| BRAIN.FORWARD | 16.9 | 2.10 | 8x |
-| ENV.RAY_DISTANCES | 31.1 | 1.19 | 26x |
-| ENV.TICK (full) | 34.9 | 1.32 | 26x |
-| EVOLUTION.ADVANCE (1 tick) | 50.2 | 3.33 | 15x |
+| brain forward (200 genomes) | 0.033 | 2.10 (64x slower) | 16.9 (510x) |
+| ray distances | 0.29 | 1.19 (4x) | 31.1 (107x) |
+| env tick (full) | 0.38 | 1.32 (3.5x) | 34.9 (92x) |
+| evolution tick (brain + env) | - | 3.33 | 50.2 |
 
-Whole iterations (native): evolution 5.2 s/generation (peak 63 MB), REINFORCE 5.9 s/iteration (peak 77 MB), DQN about 80 s/iteration (#46).
-Python-side timings: still to measure.
+Python's numpy calls BLAS and vectorised C for these shapes, so the original is much faster per call than the port: the compiled jdBasic is 3.5-64x slower, the interpreter 90-500x slower (jdBasic's native kernels run at about 7-14 ns per multiply-add, see `STATUS.md`). The jdBasic columns are from a loaded machine; a quiet one measured about 40% lower (same ratios between backends). Native is 8-26x faster than interpreted.
+
+Whole iterations (native): evolution 5.2 s/generation (peak 63 MB), REINFORCE 5.9 s/iteration (peak 77 MB), DQN about 45 s/iteration (#46). Python's whole-iteration times were not measured.
 
 ## Learning results
 

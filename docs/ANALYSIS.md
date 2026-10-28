@@ -24,6 +24,7 @@ stated). Sources: `bench.jdb`, `plot_curves.jdb`, `par_seeds.jdb`, `STATUS.md`, 
 Interpreted vs native (`-c`), ms per call: brain forward 16.9 -> 2.1 (8x), ray casting 31.1 -> 1.19 (26x), env tick 34.9 -> 1.32
 (26x), evolution tick 50.2 -> 3.3 (15x). Whole iterations: evolution 70 s -> 5.2 s, REINFORCE 14.5 s -> 5.9 s. The native build
 is what makes training practical; the interpreter is for checking.
+Against the Python original (numpy, `tests/py_bench.py`) the compiled port is still 3.5x (env tick) to 64x (brain forward, where numpy uses BLAS) slower per call, so the port's value is portability and the language comparison, not speed.
 
 ## 3. What limits speed
 
