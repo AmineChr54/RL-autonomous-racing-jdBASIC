@@ -1,0 +1,142 @@
+' playable.jdb - race the best evolved brain yourself (issue #56). Interpreted (needs the GFX window):
+'   tools/jd.sh run playable.jdb                       arrow keys / WASD: steer + throttle, R restart, Esc quit
+'   tools/jd.sh run playable.jdb demo 400 out.png      autopilot for the human car, screenshot after 400 ticks, exit
+' The AI opponent is assets/best_brain.json (made by train_brain.jdb). First car over one lap wins; a crash ends your run.
+IMPORT TRACK, ENV, BRAIN, GUI
+
+CONST LAP_TICKS_PER_SEC = 60
+
+DIM gQuit AS INTEGER = 0
+SUB OnQuit(info AS ARRAY)
+    gQuit = 1
+ENDSUB
+
+DIM demo AS INTEGER = 0
+DIM demoTicks AS INTEGER = 0
+DIM shot$ = ""
+IF LEN(OS.ARGS()) > 1 THEN
+    IF OS.ARGS()[1] = "demo" THEN
+        demo = 1
+        demoTicks = CINT(VAL(OS.ARGS()[2]))
+        shot$ = OS.ARGS()[3]
+    ENDIF
+ENDIF
+
+DIM tr AS MAP = TRACK.NEW("hard")
+DIM tl AS DOUBLE = tr{"length"}
+DIM one AS ARRAY = JSON.PARSE$(TXTREADER$("assets/best_brain.json"))
+DIM br AS MAP = BRAIN.PREP(RESHAPE(one + 0, [1, BRAIN.GENOME_SIZE()]))
+
+DIM he AS MAP = ENV.NEW(tr, 1, 1000000, 0)        ' the human's car
+DIM ae AS MAP = ENV.NEW(tr, 1, 1000000, 1)        ' the AI's car
+DIM view AS MAP = {}                              ' both cars as one 2-car env, for GUI.DRAW_WORLD
+view{"n"} = 2
+view{"x"} = ZEROS([2])
+view{"y"} = ZEROS([2])
+view{"th"} = ZEROS([2])
+view{"alive"} = ONES([2])
+view{"progress"} = ZEROS([2])
+
+DIM gui AS MAP = GUI.NEW(tr, 2)
+ON "QUIT" CALL OnQuit
+
+DIM hobs AS ARRAY = ENV.RESET(he)
+DIM aobs AS ARRAY = ENV.RESET(ae)
+DIM hact AS ARRAY = RESHAPE(ZEROS([2]), [1, 2])
+DIM aact AS ARRAY = RESHAPE(ZEROS([2]), [1, 2])
+DIM out AS ARRAY = BRAIN.FORWARD(br, aobs)
+DIM ticks AS INTEGER = 0
+DIM state AS INTEGER = 0          ' 0 racing, 1 you won, 2 AI won, 3 you crashed
+DIM running AS INTEGER = 1
+DIM f0 AS DOUBLE = 0.0
+DIM steer AS DOUBLE = 0.0
+DIM thr AS DOUBLE = 0.0
+DIM hx AS ARRAY = he{"x"}
+DIM hy AS ARRAY = he{"y"}
+DIM hth AS ARRAY = he{"th"}
+DIM hal AS ARRAY = he{"alive"}
+DIM hpr AS ARRAY = he{"progress"}
+DIM ax AS ARRAY = ae{"x"}
+DIM ay AS ARRAY = ae{"y"}
+DIM ath AS ARRAY = ae{"th"}
+DIM aal AS ARRAY = ae{"alive"}
+DIM apr AS ARRAY = ae{"progress"}
+DIM vx AS ARRAY = view{"x"}
+DIM vy AS ARRAY = view{"y"}
+DIM vth AS ARRAY = view{"th"}
+DIM val2 AS ARRAY = view{"alive"}
+DIM vpr AS ARRAY = view{"progress"}
+DIM px AS INTEGER = TRACK.WORLD_W
+DIM best$ = "none yet"
+DIM msg$ = ""
+
+WHILE running = 1
+    f0 = TICK()
+    IF gQuit = 1 OR GFX.KEYSTATE("Escape") THEN running = 0
+    IF GFX.KEYSTATE("R") THEN
+        hobs = ENV.RESET(he)
+        aobs = ENV.RESET(ae)
+        ticks = 0
+        state = 0
+    ENDIF
+    IF state = 0 THEN
+        ' the AI always drives its brain
+        out = BRAIN.FORWARD(br, aobs)
+        aact[0, 0] = out[0, 0]
+        aact[0, 1] = out[0, 1]
+        aobs = ENV.TICK(ae, aact)
+        IF demo = 1 THEN
+            ' autopilot: a second brain copy drives the human car
+            out = BRAIN.FORWARD(br, hobs)
+            hact[0, 0] = out[0, 0] * 0.9
+            hact[0, 1] = out[0, 1]
+        ELSE
+            steer = 0
+            thr = 0
+            IF GFX.KEYSTATE("Left") OR GFX.KEYSTATE("A") THEN steer = steer - 1
+            IF GFX.KEYSTATE("Right") OR GFX.KEYSTATE("D") THEN steer = steer + 1
+            IF GFX.KEYSTATE("Up") OR GFX.KEYSTATE("W") THEN thr = 1
+            IF GFX.KEYSTATE("Down") OR GFX.KEYSTATE("S") THEN thr = -1
+            hact[0, 0] = steer
+            hact[0, 1] = thr
+        ENDIF
+        hobs = ENV.TICK(he, hact)
+        ticks = ticks + 1
+        IF hal[0] = 0 THEN state = 3
+        IF apr[0] >= tl AND state = 0 THEN state = 2
+        IF hpr[0] >= tl THEN
+            state = 1
+            best$ = FORMAT$("{:.2f} s", ticks / LAP_TICKS_PER_SEC)
+        ENDIF
+    ENDIF
+    vx[0] = hx[0]
+    vy[0] = hy[0]
+    vth[0] = hth[0]
+    val2[0] = hal[0]
+    vpr[0] = hpr[0]
+    vx[1] = ax[0]
+    vy[1] = ay[0]
+    vth[1] = ath[0]
+    val2[1] = aal[0]
+    vpr[1] = apr[0]
+    GUI.DRAW_WORLD(gui, view)
+    GUI.TXT "YOU", hx[0] - 10, hy[0] - 26, 14, 1, 255, 255, 255
+    GUI.TXT "AI", ax[0] - 6, ay[0] - 26, 14, 1, 120, 200, 255
+    RECT px, 0, GUI.PANEL, GUI.WIN_H, TRUE, 22, 24, 29
+    GUI.TXT "RACE THE AI", px + 15, 10, 22, 1, 255, 214, 102
+    GUI.TXT FORMAT$("time   {:6.2f} s", ticks / LAP_TICKS_PER_SEC), px + 15, 50, 18, 0, 225, 228, 235
+    GUI.TXT FORMAT$("you    {:4.0f}%  of a lap", MIN([hpr[0] / tl * 100, 999])), px + 15, 80, 16, 0, 255, 255, 255
+    GUI.TXT FORMAT$("AI     {:4.0f}%  of a lap", MIN([apr[0] / tl * 100, 999])), px + 15, 100, 16, 0, 120, 200, 255
+    GUI.TXT "your best: " + best$, px + 15, 130, 16, 0, 225, 228, 235
+    GUI.TXT "Arrows / WASD drive   R restart   Esc quit", px + 15, 660, 13, 0, 160, 165, 175
+    IF state = 1 THEN msg$ = "YOU WIN!"
+    IF state = 2 THEN msg$ = "THE AI WINS - press R"
+    IF state = 3 THEN msg$ = "CRASHED - press R"
+    IF state > 0 THEN GUI.TXT msg$, 330, 320, 30, 1, 255, 255, 120
+    IF demo = 1 AND (ticks >= demoTicks OR state > 0) THEN
+        GFX.SAVE_SCREENSHOT(shot$)
+        running = 0
+    ENDIF
+    SCREENFLIP
+    IF TICK() - f0 < 16 THEN GFX.DELAY(16 - (TICK() - f0))
+WEND

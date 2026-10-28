@@ -335,3 +335,9 @@ EXPORT SUB DRAW(g AS MAP, t AS MAP, speed AS INTEGER, turbo AS INTEGER, flash$)
     DrawPanel(g, t, e, lead, speed, turbo)
     IF flash$ <> "" THEN TXT flash$, 15, 12, 16, 0, 255, 255, 255
 ENDSUB
+
+' track image + cars only (playable.jdb draws its own side panel)
+EXPORT SUB DRAW_WORLD(g AS MAP, e AS MAP)
+    GFX.DRAWIMAGE(g{"bg"}, 0, 0)
+    DrawCars(g, e)
+ENDSUB

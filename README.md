@@ -85,6 +85,16 @@ The planned entry point mirrors the Python one: `jdBasic main.jdb --mode ppo --t
 
 ![GUI screenshot](assets/shot.png)
 
+## Play against the AI
+
+```bash
+tools/jd.sh native train_brain.jdb 25     # optional: retrain the opponent (assets/best_brain.json is committed)
+tools/jd.sh run playable.jdb               # arrows / WASD to drive, R restart, Esc quit
+```
+
+You race the best evolved brain on the hard track; the first car over one lap wins and a crash ends your run. A lap takes the AI about 8 s.
+![playable screenshot](assets/playable_shot.png)
+
 ## Tests
 
 | Command | Checks |
