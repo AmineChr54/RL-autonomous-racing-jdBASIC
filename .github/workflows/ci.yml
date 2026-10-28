@@ -63,6 +63,9 @@ jobs:
         run: |
           JD_TIME=240 tools/jd.sh run tests/gif_selftest.jdb
           JD_TIME=240 tools/jd.sh native tests/gif_selftest.jdb
+      - name: leak_check (peak memory flat over 3x longer evolution run)
+        timeout-minutes: 12
+        run: JD_MEM=768 tests/leak_check.sh tests/evo_smoke.jdb 2 6
       - name: env_parity
         timeout-minutes: 10
         run: python tests/env_parity.py && python tests/env_parity.py --native
