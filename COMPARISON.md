@@ -36,7 +36,16 @@ Python-side timings: still to measure.
 
 ## Learning results
 
-See `assets/curves.svg` (made by `plot_curves.jdb`). Table of half-lap iteration and final distances: filled in when #26 lands.
+Hard track, 200 cars, seed 0, native. Half a lap = 1593 px. Chart: `assets/curves.svg` (`plot_curves.jdb`); raw data: `assets/curves.csv`.
+
+| method | iterations | half lap at iteration | final avg (px) | best (px) | peak memory |
+|---|---|---|---|---|---|
+| evolution | 60 | 26 | 3425 | 6011 | 63 MB |
+| REINFORCE | 100 | 38 | 4702 | 5691 | 77 MB |
+| PPO | 30 | 11 | 5382 | 5499 | 64 MB |
+| DQN | 15 | never | 152 | 704 | 58 MB |
+
+PPO learns fastest. DQN is too slow (about 45 s/iteration) and too short a run to say anything yet (#46). Python README numbers: not compared yet.
 
 ## What replaced what
 
