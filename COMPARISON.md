@@ -65,6 +65,23 @@ Final mean 3113 +- 513 px; every seed reaches half a lap, on average at generati
 
 Final mean 3712 +- 350 px, half a lap at iteration 42.2 on average (36-52); seed 0 matches the single-run curve (38). 628 s in parallel instead of about 2830 s one after another (4.5x), peak 626 MB. REINFORCE is steadier across seeds than evolution (spread 9% vs 16% of the mean) but needs about 1.7x more iterations to reach half a lap.
 
+### Seed-to-seed variance (PPO, 30 iterations, 8 seeds in parallel)
+
+| seed | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
+|---|---|---|---|---|---|---|---|---|
+| half-lap iteration | 11 | 18 | 17 | 14 | 14 | 16 | 12 | 12 |
+| final mean (px) | 5382 | 5226 | 5511 | 5317 | 5216 | 5338 | 5596 | 5463 |
+
+Final mean 5381 +- 126 px (spread 2%), half a lap at iteration 14.2 on average (11-18); seed 0 matches the single-run curve exactly. 1224 s in parallel instead of about 4000 s one after another (3.3x), peak 499 MB (about 62 MB per worker).
+
+| method | half-lap iteration (mean, range) | final mean over 8 seeds | spread |
+|---|---|---|---|
+| PPO (30 it) | 14.2 (11-18) | 5381 px | 2% |
+| REINFORCE (60 it) | 42.2 (36-52) | 3712 px | 9% |
+| evolution (30 gen) | 24.8 (19-30) | 3113 px | 16% |
+
+PPO is both the fastest and the most consistent learner.
+
 ## What replaced what
 
 | Python | jdBasic |

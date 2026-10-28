@@ -118,7 +118,7 @@ Run: `tools/jd.sh run bench.jdb 3 interp` / `tools/jd.sh native bench.jdb 20 nat
 ## Parallel seeds (issue #54, `par_seeds.jdb`, native only)
 `tools/jd.sh native par_seeds.jdb evolution 2 8`: one ASYNC worker (OS thread) per seed through `lib/pool.jdb`, each with its own track and env.
 - evolution, REINFORCE: correct. Seed 0 on 4 threads equals the single-process result exactly (159.35786). 8 seeds in 14 s vs 7 s for one (about 4x throughput), peak 293 MB.
-- PPO, DQN: fail with more than one worker (random "Array index out of bounds" / "MATMUL: incompatible dimensions", different on every run). They use the torch.jdb tape, which seems to be shared global state between threads under -c.
+- PPO, DQN: with workers started at the same moment they fail (random "Array index out of bounds" / "MATMUL: incompatible dimensions"). `TRAINER.NEW` registers the TORCH params in module globals (`gPVal`, `gPCount`, ...), which the threads share under -c. Workaround in `par_seeds.jdb`: `STAGGER_MS` (6 s) between worker starts. With it 8 PPO seeds x 30 iterations ran clean, seed 0 identical to the single run, 1224 s (3.3x), peak 499 MB. DQN not tried in parallel yet. A real fix would make the param store per-worker.
 - In `par_seeds.jdb` a string worker parameter (`mode$`, passed through `POOL.SPAWN`) arrived null under -c, so the mode is passed as a number. A plain `ASYNC FUNC W(s$)` called with a string variable works in both backends (re-checked), so the cause is not isolated.
 
 - Interpreter (Build 102): `INSTR(h$, n$)` returns a 0-based index (-1 if absent) and `MID$(s$, start, len)` takes a 0-based start. Found while drawing the pixel font in `pitch.jdb`.

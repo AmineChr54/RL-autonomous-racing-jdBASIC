@@ -3,6 +3,8 @@
 ' Each worker owns its own track and env; only the final mean distance comes back through the pool.
 IMPORT TRACK, TRAINER, POOL
 
+CONST STAGGER_MS = 6000
+
 FUNC ModeName$(m AS INTEGER)
     IF m = 0 THEN RETURN "evolution"
     IF m = 1 THEN RETURN "reinforce"
@@ -11,6 +13,8 @@ FUNC ModeName$(m AS INTEGER)
 ENDFUNC
 
 FUNC TrainSeed(m AS INTEGER, iters AS INTEGER, seed AS INTEGER) AS DOUBLE
+    ' stagger the starts: TRAINER.NEW registers TORCH params in module globals that the threads share (needed for ppo/dqn)
+    IF STAGGER_MS > 0 THEN SLEEP seed * STAGGER_MS
     DIM mode$ = ModeName$(m)
     DIM tr AS MAP = TRACK.NEW("hard")
     DIM t AS MAP = TRAINER.NEW(mode$, tr, 200, 900, seed)
