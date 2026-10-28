@@ -120,3 +120,6 @@ Run: `tools/jd.sh run bench.jdb 3 interp` / `tools/jd.sh native bench.jdb 20 nat
 - evolution, REINFORCE: correct. Seed 0 on 4 threads equals the single-process result exactly (159.35786). 8 seeds in 14 s vs 7 s for one (about 4x throughput), peak 293 MB.
 - PPO, DQN: fail with more than one worker (random "Array index out of bounds" / "MATMUL: incompatible dimensions", different on every run). They use the torch.jdb tape, which seems to be shared global state between threads under -c.
 - A string argument to an `ASYNC FUNC` arrives as null under -c: pass the mode as a number.
+
+- Interpreter (Build 102): `INSTR(h$, n$)` returns a 0-based index (-1 if absent) and `MID$(s$, start, len)` takes a 0-based start. Found while drawing the pixel font in `pitch.jdb`.
+- `pitch.jdb` natively compiled ran into the 1.5 GB cap (bug 9, array temporaries); the interpreter needs 1.4 GB peak for 124 frames of 500 x 470 and takes about 1 min.

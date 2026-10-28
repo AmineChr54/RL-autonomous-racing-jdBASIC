@@ -1,0 +1,160 @@
+' pitch.jdb - the pitch video, composed and encoded entirely in jdBasic (issue #57, storyboard: docs/PITCH.md).
+'   JD_MEM=1500 tools/jd.sh run pitch.jdb [out.gif]   default docs/gifs/pitch.gif; needs docs/gifs/{evolution,reinforce,ppo,dqn}.gif
+' Interpreted: about 1 min, peak 1.4 GB. Native -c runs out of memory (whole-array temporaries are never freed, STATUS bug 9).
+' Scenes (500 x 470, 16-colour palette of record.jdb):  1 title card   2 the four methods side by side (2 x 2)   3 the numbers.
+' Text is drawn with a built-in 3 x 5 pixel font. Frames are palette-index arrays written with GIF.WRITEINDEXED.
+IMPORT GIF
+
+CONST W = 500
+CONST H = 470
+CONST CW = 250
+CONST CH = 215
+CONST TOPB = 40
+CONST C_BG = 0
+CONST C_GOLD = 2
+CONST C_LEAD = 3
+CONST C_RAY = 4
+CONST C_WHITE = 10
+CONST C_DIM = 11
+CONST NMONT = 96
+
+FUNC CharSet$()
+    RETURN "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .%-:"
+ENDFUNC
+
+FUNC Glyph$(p AS INTEGER)
+    DIM gs$ = [".#.#.#####.##.#", "##.#.###.#.###.", ".###..#..#...##", "##.#.##.##.###.", "####..##.#..###", "####..##.#..#..", _
+            ".###..#.##.#.##", "#.##.#####.##.#", "###.#..#..#.###", "..#..#..##.#.#.", "#.##.###.#.##.#", "#..#..#..#..###", _
+            "#.########.##.#", "##.#.##.##.##.#", ".#.#.##.##.#.#.", "##.#.###.#..#..", ".#.#.##.###..##", "##.#.###.#.##.#", _
+            ".###...#...###.", "###.#..#..#..#.", "#.##.##.##.####", "#.##.##.##.#.#.", "#.##.########.#", "#.##.#.#.#.##.#", _
+            "#.##.#.#..#..#.", "###..#.#.#..###", _
+            "####.##.##.####", ".#.##..#..#.###", "###..#####..###", "###..####..####", "#.##.####..#..#", _
+            "####..###..####", "####..####.####", "###..#..#..#..#", "####.#####.####", "####.####..####", _
+            "...............", ".............#.", "#.#..#.#.#..#.#", "......###......", "....#.....#...."]
+    RETURN gs$[p]
+ENDFUNC
+
+' draw s$ with its top-left at (x, y); every font pixel becomes a sc x sc square
+SUB DrawText(fr AS ARRAY, s$, x AS INTEGER, y AS INTEGER, sc AS INTEGER, col AS INTEGER)
+    DIM i AS INTEGER = 0
+    DIM p AS INTEGER = 0
+    DIM g$ = ""
+    DIM r AS INTEGER = 0
+    DIM c AS INTEGER = 0
+    DIM a AS INTEGER = 0
+    DIM b AS INTEGER = 0
+    DIM px AS INTEGER = 0
+    DIM py AS INTEGER = 0
+    FOR i = 1 TO LEN(s$)
+        p = INSTR(CharSet$(), MID$(s$, i - 1, 1))      ' INSTR and MID$ count from 0 in this build
+        IF p >= 0 THEN
+            g$ = Glyph$(p)
+            FOR r = 0 TO 4
+                FOR c = 0 TO 2
+                    IF MID$(g$, r * 3 + c, 1) = "#" THEN
+                        FOR a = 0 TO sc - 1
+                            FOR b = 0 TO sc - 1
+                                px = x + (i - 1) * 4 * sc + c * sc + b
+                                py = y + r * sc + a
+                                IF px >= 0 AND px < W AND py >= 0 AND py < H THEN fr[py * W + px] = col
+                            NEXT b
+                        NEXT a
+                    ENDIF
+                NEXT c
+            NEXT r
+        ENDIF
+    NEXT i
+ENDSUB
+
+SUB Centered(fr AS ARRAY, s$, y AS INTEGER, sc AS INTEGER, col AS INTEGER)
+    DrawText(fr, s$, (W - LEN(s$) * 4 * sc + sc) \ 2, y, sc, col)
+ENDSUB
+
+' copy a CW x CH clip frame into the canvas at (ox, oy)
+SUB Blit(fr AS ARRAY, src AS ARRAY, ox AS INTEGER, oy AS INTEGER)
+    DIM y AS INTEGER = 0
+    DIM x AS INTEGER = 0
+    FOR y = 0 TO CH - 1
+        FOR x = 0 TO CW - 1
+            fr[(oy + y) * W + ox + x] = src[y * CW + x]
+        NEXT x
+    NEXT y
+ENDSUB
+
+DIM outp$ = "docs/gifs/pitch.gif"
+IF LEN(OS.ARGS()) > 1 THEN outp$ = OS.ARGS()[1]
+DIM pal AS ARRAY = [0]
+DIM clips AS ARRAY = [0]
+DIM frames AS ARRAY = []
+DIM fr AS ARRAY = ZEROS([W * H])
+DIM k AS INTEGER = 0
+DIM f AS INTEGER = 0
+DIM i AS INTEGER = 0
+DIM nclip AS INTEGER = 0
+DIM src AS ARRAY = [0]
+DIM g AS MAP = {}
+DIM t0 AS DOUBLE = TICK()
+
+' ---- scene 1: title card (12 frames)
+FOR f = 0 TO 11
+    fr = ZEROS([W * H])
+    Centered(fr, "200 CARS", 120, 6, C_WHITE)
+    Centered(fr, "0 DRIVERS", 180, 6, C_LEAD)
+    Centered(fr, "ALL IN JDBASIC", 270, 4, C_GOLD)
+    IF f > 4 THEN Centered(fr, "NEUROEVOLUTION  REINFORCE  PPO  DQN", 340, 2, C_DIM)
+    PUSH(frames, fr)
+NEXT f
+
+' ---- scene 2: the four learners on the hard track, 2 x 2 (NMONT frames)
+DIM c0 AS ARRAY = [0]
+DIM c1 AS ARRAY = [0]
+DIM c2 AS ARRAY = [0]
+DIM c3 AS ARRAY = [0]
+g = GIF.READ("docs/gifs/evolution.gif")
+pal = g{"palette"}
+c0 = g{"frames"}
+g = GIF.READ("docs/gifs/reinforce.gif")
+c1 = g{"frames"}
+g = GIF.READ("docs/gifs/ppo.gif")
+c2 = g{"frames"}
+g = GIF.READ("docs/gifs/dqn.gif")
+c3 = g{"frames"}
+PRINT "clips decoded "; LEN(c0); " "; LEN(c1); " "; LEN(c2); " "; LEN(c3); "  ["; INT(TICK() - t0); " ms]"
+FOR f = 0 TO NMONT - 1
+    fr = ZEROS([W * H])
+    Centered(fr, "FOUR LEARNERS - ONE TRACK", 12, 2, C_GOLD)
+    src = c0[(f * LEN(c0)) \ NMONT]
+    Blit(fr, src, 0, TOPB)
+    src = c1[(f * LEN(c1)) \ NMONT]
+    Blit(fr, src, CW, TOPB)
+    src = c2[(f * LEN(c2)) \ NMONT]
+    Blit(fr, src, 0, TOPB + CH)
+    src = c3[(f * LEN(c3)) \ NMONT]
+    Blit(fr, src, CW, TOPB + CH)
+    DrawText(fr, "EVOLUTION", CW - 40, TOPB + 6, 1, C_WHITE)
+    DrawText(fr, "REINFORCE", 2 * CW - 40, TOPB + 6, 1, C_WHITE)
+    DrawText(fr, "PPO", CW - 16, TOPB + CH + 6, 1, C_WHITE)
+    DrawText(fr, "DQN", 2 * CW - 16, TOPB + CH + 6, 1, C_WHITE)
+    PUSH(frames, fr)
+NEXT f
+
+' ---- scene 3: the numbers (16 frames)
+FOR f = 0 TO 15
+    fr = ZEROS([W * H])
+    Centered(fr, "THE NUMBERS", 40, 4, C_GOLD)
+    IF f >= 1 THEN Centered(fr, "NATIVE 26X FASTER THAN INTERPRETED", 130, 2, C_WHITE)
+    IF f >= 3 THEN Centered(fr, "63 MB FLAT MEMORY - NO LEAKS", 180, 2, C_WHITE)
+    IF f >= 5 THEN Centered(fr, "PPO HALF A LAP IN 11 ITERATIONS", 230, 2, C_LEAD)
+    IF f >= 7 THEN Centered(fr, "RACE THE AI YOURSELF", 280, 2, C_WHITE)
+    IF f >= 9 THEN Centered(fr, "0 LINES OF PYTHON", 360, 3, C_GOLD)
+    PUSH(frames, fr)
+NEXT f
+
+c0 = [0]
+c1 = [0]
+c2 = [0]
+c3 = [0]
+src = [0]
+PRINT "frames "; LEN(frames); "  composed in "; INT(TICK() - t0); " ms"
+DIM nb AS INTEGER = GIF.WRITEINDEXED(outp$, W, H, pal, frames, 80)
+PRINT "wrote "; outp$; "  "; nb; " bytes  total "; INT(TICK() - t0); " ms"

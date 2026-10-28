@@ -96,6 +96,12 @@ The planned entry point mirrors the Python one: `jdBasic main.jdb --mode ppo --t
 
 ![GUI screenshot](assets/shot.png)
 
+## Pitch video
+
+![pitch](docs/gifs/pitch.gif)
+
+Composed and encoded entirely in jdBasic: `JD_MEM=1500 tools/jd.sh run pitch.jdb` stitches the four per-method GIFs from `record.jdb` into one 2 x 2 film with a title card and a numbers card (built-in pixel font, `lib/gif.jdb` encoder).
+
 ## Play against the AI
 
 ```bash
