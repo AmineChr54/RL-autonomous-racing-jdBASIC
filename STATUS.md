@@ -123,3 +123,7 @@ Run: `tools/jd.sh run bench.jdb 3 interp` / `tools/jd.sh native bench.jdb 20 nat
 
 - Interpreter (Build 102): `INSTR(h$, n$)` returns a 0-based index (-1 if absent) and `MID$(s$, start, len)` takes a 0-based start. Found while drawing the pixel font in `pitch.jdb`.
 - `pitch.jdb` natively compiled ran into the 1.5 GB cap (bug 9, array temporaries); the interpreter needs 1.4 GB peak for 124 frames of 500 x 470 and takes about 1 min.
+
+## DQN speed: what was tried (issue #46, 2026-10-28, native Build 102)
+One layer forward, 512 rows x 64 -> 64 (2.1 M multiply-adds): scalar loop 28.6 ms (13.6 ns per MAC); reordered so weights are read contiguously 30.1 ms; unrolled x4 37.5 ms (slower); `TANH(MATMUL(x, w))` 13.9 ms (6.6 ns per MAC) and it leaks about 0.5 MB per call (200 calls: +127 MB).
+So source-level loop tuning does not help, and even a leak-free `MATMUL` would be only about 2x faster here: the native array kernels run at roughly 7-14 ns per multiply-add. A 45 s DQN iteration (256 learn steps) can only get big wins from a faster array/loop code generator upstream (compare: plain C would be about 1 ns per MAC).
