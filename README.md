@@ -7,7 +7,7 @@ jdBasic has no autodiff and no deep-learning library, so this repo also contains
 The port has three goals:
 
 1. **Rewrite the project in jdBasic** with the same file layout, constants and behaviour as the Python original, so the two can be compared side by side.
-2. **Find out what jdBasic is missing** for this kind of numeric work, and how much each gap costs. This goes into `COMPARISON.md`.
+2. **Find out what jdBasic is missing** for this kind of numeric work, and how much each gap costs. This is in [COMPARISON.md](COMPARISON.md).
 3. **Run it both ways**: interpreted (`jdBasic main.jdb`) and compiled to a native `.exe` (`jdBasic -c main.jdb`).
 
 > **Status: work in progress.** The world (track and env), the per-car brains and the autograd engine are done. Each matches Python, or a numeric gradient for the autograd, in both backends. Neuroevolution runs in the interpreter. The gradient-based algorithms, the window and the docs are being built. See the [issues](../../issues) for what is done and what is next.
@@ -72,6 +72,17 @@ Every tensor is 2-D. The heavy maths runs on jdBasic's C++ array builtins (`MATM
 
 Neuroevolution gives every car its own network. Python evaluates all 200 at once with `torch.baddbmm`. jdBasic has no 3-D matmul, so `brain.jdb` does each layer with three ordinary 2-D `MATMUL`s, still for the whole swarm at once. It expands the inputs, multiplies element-wise by each car's weights, then sums per output.
 
+## Documentation
+
+| Doc | What |
+|---|---|
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | module map, the two backends, tests, parallelism and GPU notes |
+| [COMPARISON.md](COMPARISON.md) | Python vs jdBasic: lines, timings, learning results, bugs, wishlist |
+| [STATUS.md](STATUS.md) | state of every component, bench numbers, jdBasic bug list |
+| [docs/LIBRARY_AUDIT.md](docs/LIBRARY_AUDIT.md) | which jdBasic library modules are worth using |
+| [docs/PITCH.md](docs/PITCH.md) | storyboard of the pitch video |
+| `assets/curves.svg` | learning curves of the four methods |
+
 ## Quick start
 
 Needs jdBasic v1.1 Build 102 or newer (Windows x64; the `-c` native compiler needs MSVC Build Tools).
@@ -122,7 +133,7 @@ The native compiler is strict and fixes a type for every value at compile time. 
 * No implicit broadcasting: repeat a row explicitly with `MATMUL(ONES_RC(n, 1), row)`.
 * Identifiers are case-insensitive (`genome` and `GENOME` clash), and `STEP` is reserved.
 
-The full list of jdBasic bugs and gaps, each with its workaround and measured cost, goes into `COMPARISON.md`.
+The full list of jdBasic bugs and gaps, each with its workaround and measured cost, is in [COMPARISON.md](COMPARISON.md).
 
 ## Development workflow
 
