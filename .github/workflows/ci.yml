@@ -72,6 +72,9 @@ jobs:
       - name: brain_parity
         timeout-minutes: 10
         run: python tests/brain_parity.py && python tests/brain_parity.py --native
+      - name: torch_vs_pytorch (skips when torch is missing)
+        timeout-minutes: 10
+        run: python tests/torch_vs_pytorch.py && python tests/torch_vs_pytorch.py --native
       - name: gui_pixels (road pre-render vs numpy, interpreter + native)
         timeout-minutes: 10
         run: python tests/gui_pixels.py && python tests/gui_pixels.py --native

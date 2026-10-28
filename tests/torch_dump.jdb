@@ -1,0 +1,113 @@
+' Dumps torch.jdb results for tests/torch_vs_pytorch.py: identical formula-defined weights and inputs on both sides,
+' forward output, loss, parameter gradients and one Adam step for (A) an 8-16-16-2 MLP with MSE and (B) an
+' 8-16-16-5 MLP with GATHERCOL + SMOOTH_L1 (the DQN loss). Output: tests/out/torch_ref.csv (name,values...).
+'   tools/jd.sh run|native tests/torch_dump.jdb
+IMPORT TORCH
+
+DIM OUT$ = "tests/out/torch_ref.csv"
+
+SUB Emit(name$, m AS ARRAY)
+    DIM r AS INTEGER = TORCH.NROWS(m)
+    DIM c AS INTEGER = TORCH.NCOLS(m)
+    DIM i AS INTEGER = 0
+    DIM j AS INTEGER = 0
+    DIM line$ = name$
+    FOR i = 0 TO r - 1
+        FOR j = 0 TO c - 1
+            line$ = line$ + "," + FORMAT$("{:.17g}", m[i, j])
+        NEXT j
+    NEXT i
+    TXTWRITER OUT$, line$ + CHR$(10), TRUE
+ENDSUB
+
+' weights W[l] (in x out) and biases b[l] (1 x out) from closed formulas, written into the tape's parameters
+SUB SetParams(net AS MAP)
+    DIM sizes AS ARRAY = net{"sizes"}
+    DIM pids AS ARRAY = net{"pids"}
+    DIM nl AS INTEGER = net{"nl"}
+    DIM l AS INTEGER = 0
+    DIM i AS INTEGER = 0
+    DIM j AS INTEGER = 0
+    DIM ni AS INTEGER = 0
+    DIM no AS INTEGER = 0
+    FOR l = 0 TO nl - 1
+        ni = CINT(sizes[l])
+        no = CINT(sizes[l + 1])
+        DIM w AS ARRAY = TORCH.ZEROS_RC(ni, no)
+        DIM b AS ARRAY = TORCH.ZEROS_RC(1, no)
+        FOR i = 0 TO ni - 1
+            FOR j = 0 TO no - 1
+                w[i, j] = 0.3 * SIN(0.37 * (i * no + j) + l + 0.5)
+            NEXT j
+        NEXT i
+        FOR j = 0 TO no - 1
+            b[0, j] = 0.05 * COS(0.7 * j + l)
+        NEXT j
+        TORCH.PUT(pids[2 * l], w)
+        TORCH.PUT(pids[2 * l + 1], b)
+    NEXT l
+ENDSUB
+
+SUB EmitParams(tag$, net AS MAP, grads AS INTEGER)
+    DIM pids AS ARRAY = net{"pids"}
+    DIM k AS INTEGER = 0
+    FOR k = 0 TO LEN(pids) - 1
+        IF grads = 1 THEN
+            Emit(tag$ + "_grad" + STR$(k), TORCH.PGRAD(pids[k]))
+        ELSE
+            Emit(tag$ + "_param" + STR$(k), TORCH.PVAL(pids[k]))
+        ENDIF
+    NEXT k
+ENDSUB
+
+DIM n AS INTEGER = 6
+DIM X AS ARRAY = TORCH.ZEROS_RC(n, 8)
+DIM T AS ARRAY = TORCH.ZEROS_RC(n, 2)
+DIM Y AS ARRAY = TORCH.ZEROS_RC(n, 1)
+DIM idx AS ARRAY = ZEROS([n])
+DIM r AS INTEGER = 0
+DIM c AS INTEGER = 0
+FOR r = 0 TO n - 1
+    FOR c = 0 TO 7
+        X[r, c] = SIN(0.21 * (r * 8 + c) + 0.3)
+    NEXT c
+    FOR c = 0 TO 1
+        T[r, c] = 0.5 * COS(0.9 * (r * 2 + c))
+    NEXT c
+    Y[r, 0] = 2.0 * SIN(r * 1.7)
+    idx[r] = r MOD 5
+NEXT r
+TXTWRITER OUT$, ""
+
+' ---- A: 8-16-16-2, mean squared error, one Adam step
+DIM gen AS INTEGER = RNG.NEW(1)
+DIM na AS MAP = TORCH.MLP_NEW([8, 16, 16, 2], gen)
+SetParams(na)
+TORCH.RESET()
+DIM outA AS INTEGER = TORCH.MLP_FWD(na, TORCH.C(X))
+DIM lossA AS INTEGER = TORCH.TMEAN(TORCH.SQUARE(TORCH.MINUS(outA, TORCH.C(T))))
+TORCH.ZERO_GRAD(TORCH.MLP_PIDS(na))
+TORCH.BACKWARD(lossA)
+Emit("A_out", TORCH.VALUE(outA))
+Emit("A_loss", TORCH.VALUE(lossA))
+EmitParams("A", na, 1)
+DIM optA AS MAP = TORCH.ADAM_NEW(TORCH.MLP_PIDS(na), 0.01)
+TORCH.ADAM_STEP(optA)
+EmitParams("A", na, 0)
+
+' ---- B: 8-16-16-5, DQN loss (gather one action's Q, smooth-L1 to a target), one Adam step
+DIM nb AS MAP = TORCH.MLP_NEW([8, 16, 16, 5], gen)
+SetParams(nb)
+TORCH.RESET()
+DIM q AS INTEGER = TORCH.MLP_FWD(nb, TORCH.C(X))
+DIM sel AS INTEGER = TORCH.GATHERCOL(q, idx)
+DIM lossB AS INTEGER = TORCH.SMOOTH_L1(sel, Y)
+TORCH.ZERO_GRAD(TORCH.MLP_PIDS(nb))
+TORCH.BACKWARD(lossB)
+Emit("B_q", TORCH.VALUE(q))
+Emit("B_loss", TORCH.VALUE(lossB))
+EmitParams("B", nb, 1)
+DIM optB AS MAP = TORCH.ADAM_NEW(TORCH.MLP_PIDS(nb), 0.01)
+TORCH.ADAM_STEP(optB)
+EmitParams("B", nb, 0)
+PRINT "wrote "; OUT$

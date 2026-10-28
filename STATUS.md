@@ -127,3 +127,6 @@ Run: `tools/jd.sh run bench.jdb 3 interp` / `tools/jd.sh native bench.jdb 20 nat
 ## DQN speed: what was tried (issue #46, 2026-10-28, native Build 102)
 One layer forward, 512 rows x 64 -> 64 (2.1 M multiply-adds): scalar loop 28.6 ms (13.6 ns per MAC); reordered so weights are read contiguously 30.1 ms; unrolled x4 37.5 ms (slower); `TANH(MATMUL(x, w))` 13.9 ms (6.6 ns per MAC) and it leaks about 0.5 MB per call (200 calls: +127 MB).
 So source-level loop tuning does not help, and even a leak-free `MATMUL` would be only about 2x faster here: the native array kernels run at roughly 7-14 ns per multiply-add. A 45 s DQN iteration (256 learn steps) can only get big wins from a faster array/loop code generator upstream (compare: plain C would be about 1 ns per MAC).
+
+## torch.jdb vs real PyTorch (issue #28, `tests/torch_vs_pytorch.py`)
+Formula-defined weights, an 8-16-16-2 MLP with MSE and an 8-16-16-5 MLP with GATHERCOL + SMOOTH_L1 (the DQN loss): forward output, loss, every parameter gradient and one Adam step agree with PyTorch 2.9.1 (float64) to 1e-16, interpreted and native (tolerance 1e-9). `python tests/torch_vs_pytorch.py [--native]`; skips with a message when torch is missing (CI).
