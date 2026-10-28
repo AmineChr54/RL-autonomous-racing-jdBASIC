@@ -1,7 +1,8 @@
 ' pitch.jdb - the pitch video, composed and encoded entirely in jdBasic (issue #57, storyboard: docs/PITCH.md).
 '   JD_MEM=1500 tools/jd.sh run pitch.jdb [out.gif]   default docs/gifs/pitch.gif; needs docs/gifs/{evolution,reinforce,ppo,dqn}.gif
 ' Interpreted: about 1 min, peak 1.4 GB. Native -c runs out of memory (whole-array temporaries are never freed, STATUS bug 9).
-' Scenes (500 x 470, 16-colour palette of record.jdb):  1 title card   2 the four methods side by side (2 x 2)   3 the numbers.
+' Scenes (500 x 470, 16-colour palette of record.jdb):  1 title card   2 the four methods side by side (2 x 2)
+' 3 the learning curves drawing themselves (assets/curves.csv)   4 the numbers.
 ' Text is drawn with a built-in 3 x 5 pixel font. Frames are palette-index arrays written with GIF.WRITEINDEXED.
 IMPORT GIF
 
@@ -81,6 +82,27 @@ SUB Blit(fr AS ARRAY, src AS ARRAY, ox AS INTEGER, oy AS INTEGER)
     NEXT y
 ENDSUB
 
+' a 2 px thick line between two canvas points
+SUB DrawSeg(fr AS ARRAY, x0 AS INTEGER, y0 AS INTEGER, x1 AS INTEGER, y1 AS INTEGER, col AS INTEGER)
+    DIM dx AS INTEGER = x1 - x0
+    DIM dy AS INTEGER = y1 - y0
+    DIM n AS INTEGER = ABS(dx)
+    IF ABS(dy) > n THEN n = ABS(dy)
+    IF n = 0 THEN n = 1
+    DIM i AS INTEGER = 0
+    DIM x AS INTEGER = 0
+    DIM y AS INTEGER = 0
+    FOR i = 0 TO n
+        x = x0 + CINT(dx * i / n)
+        y = y0 + CINT(dy * i / n)
+        IF x >= 0 AND x < W - 1 AND y >= 0 AND y < H - 1 THEN
+            fr[y * W + x] = col
+            fr[y * W + x + 1] = col
+            fr[(y + 1) * W + x] = col
+        ENDIF
+    NEXT i
+ENDSUB
+
 DIM outp$ = "docs/gifs/pitch.gif"
 IF LEN(OS.ARGS()) > 1 THEN outp$ = OS.ARGS()[1]
 DIM pal AS ARRAY = [0]
@@ -138,7 +160,65 @@ FOR f = 0 TO NMONT - 1
     PUSH(frames, fr)
 NEXT f
 
-' ---- scene 3: the numbers (16 frames)
+c0 = [0]
+c1 = [0]
+c2 = [0]
+c3 = [0]
+src = [0]
+
+' ---- scene 3: learning curves draw themselves (30 frames), from assets/curves.csv (written by plot_curves.jdb)
+DIM rows AS ARRAY = SPLIT(TXTREADER$("assets/curves.csv"), CHR$(10))
+DIM nrow AS INTEGER = LEN(rows)
+DIM cf AS ARRAY = ["a"]
+DIM ys AS ARRAY = ["a"]
+DIM cols AS ARRAY = [C_GOLD, C_LEAD, C_RAY, 7]
+DIM lab$ = ["EVOLUTION", "REINFORCE", "PPO", "DQN"]
+DIM nser AS INTEGER = 0
+DIM upto AS INTEGER = 0
+DIM m AS INTEGER = 0
+DIM xa AS INTEGER = 0
+DIM ya AS INTEGER = 0
+DIM xb AS INTEGER = 0
+DIM yb AS INTEGER = 0
+DIM CX0 AS INTEGER = 60
+DIM CY0 AS INTEGER = 410
+DIM CPW AS INTEGER = 400
+DIM CPH AS INTEGER = 300
+DIM XMAXIT AS INTEGER = 100
+DIM YMAXV AS DOUBLE = 6000.0
+FOR f = 0 TO 29
+    fr = ZEROS([W * H])
+    Centered(fr, "LEARNING CURVES", 12, 3, C_GOLD)
+    DrawSeg(fr, CX0, CY0, CX0 + CPW, CY0, C_DIM)
+    DrawSeg(fr, CX0, CY0, CX0, CY0 - CPH, C_DIM)
+    ' half a lap (1593 px) marker
+    FOR m = 0 TO 19
+        DrawSeg(fr, CX0 + m * 20, CY0 - CINT(CPH * 1593 / YMAXV), CX0 + m * 20 + 8, CY0 - CINT(CPH * 1593 / YMAXV), C_DIM)
+    NEXT m
+    DrawText(fr, "HALF LAP", CX0 + 4, CY0 - CINT(CPH * 1593 / YMAXV) - 10, 1, C_DIM)
+    DrawText(fr, "ITERATION", CX0 + CPW \ 2 - 18, CY0 + 14, 1, C_DIM)
+    DrawText(fr, "PX", 30, CY0 - CPH, 1, C_DIM)
+    upto = CINT(XMAXIT * (f + 1) / 30)
+    nser = 0
+    FOR m = 0 TO nrow - 1
+        IF LEN(rows[m]) > 0 AND nser < 4 THEN
+            cf = SPLIT(rows[m], ",")
+            ys = SPLIT(cf[4], ";")
+            FOR i = 1 TO MIN([upto, LEN(ys) - 1])
+                xa = CX0 + CINT(CPW * (i - 1) / XMAXIT)
+                xb = CX0 + CINT(CPW * i / XMAXIT)
+                ya = CY0 - CINT(CPH * VAL(ys[i - 1]) / YMAXV)
+                yb = CY0 - CINT(CPH * VAL(ys[i]) / YMAXV)
+                DrawSeg(fr, xa, ya, xb, yb, CINT(cols[nser]))
+            NEXT i
+            DrawText(fr, lab$[nser], CX0 + CPW - 70, 70 + nser * 14, 1, CINT(cols[nser]))
+            nser = nser + 1
+        ENDIF
+    NEXT m
+    PUSH(frames, fr)
+NEXT f
+
+' ---- scene 4: the numbers (16 frames)
 FOR f = 0 TO 15
     fr = ZEROS([W * H])
     Centered(fr, "THE NUMBERS", 40, 4, C_GOLD)
@@ -150,11 +230,6 @@ FOR f = 0 TO 15
     PUSH(frames, fr)
 NEXT f
 
-c0 = [0]
-c1 = [0]
-c2 = [0]
-c3 = [0]
-src = [0]
 PRINT "frames "; LEN(frames); "  composed in "; INT(TICK() - t0); " ms"
 DIM nb AS INTEGER = GIF.WRITEINDEXED(outp$, W, H, pal, frames, 80)
 PRINT "wrote "; outp$; "  "; nb; " bytes  total "; INT(TICK() - t0); " ms"

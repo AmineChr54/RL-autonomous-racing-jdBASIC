@@ -11,3 +11,6 @@
 
 Captions are drawn with GFX text; transitions are alpha blends between frames. Output: GIF via `lib/gif.jdb`
 plus a PNG frame sequence for any encoder.
+
+## What exists (`pitch.jdb` -> `docs/gifs/pitch.gif`, 154 frames, 1 MB)
+Title card, the four learners side by side, the learning curves drawing themselves (from `assets/curves.csv`), the numbers card. Not yet in the film: the human-vs-AI scene (needs frames from `playable.jdb`, #57) and a voice-over style caption track.
