@@ -80,6 +80,7 @@ Neuroevolution gives every car its own network. Python evaluates all 200 at once
 | Doc | What |
 |---|---|
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | module map, the two backends, tests, parallelism and GPU notes |
+| [docs/HOWTO.md](docs/HOWTO.md) | add a track, a learner or a test; the commands for training, racing and recording |
 | [docs/ANALYSIS.md](docs/ANALYSIS.md) | what the measurements show: which method learns best, speed limits, parallelism, fidelity |
 | [COMPARISON.md](COMPARISON.md) | Python vs jdBasic: lines, timings, learning results, bugs, wishlist |
 | [STATUS.md](STATUS.md) | state of every component, bench numbers, jdBasic bug list |
