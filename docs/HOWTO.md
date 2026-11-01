@@ -10,7 +10,7 @@ before writing `.jdb`. Every recipe below ends with the commands that prove it w
 1. Add a branch for your name in `ControlPoints` (flat x, y pairs inside the 1000 x 700 world, closed loop) and in `RoadWidth`.
 2. Allow the name in `main.jdb` (`--track` choices) and, if you want, in `playable.jdb`.
 3. Check: `tools/jd.sh run tests/track_check.jdb` (point count, lap length, road pixels) and look at it with
-   `tools/jd.sh run main.jdb --track <name> --shot assets/shot.png --gens 1`.
+   `tools/jd.sh run main.jdb --track <name> --shot assets/shot.png --shot-gen 1`.
 
 Brains evolved on one track do not drive another (`docs/ANALYSIS.md`, section 7), so retrain with `train_brain.jdb` if you want opponents for it.
 
